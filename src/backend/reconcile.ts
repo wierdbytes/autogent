@@ -90,11 +90,48 @@ export interface DeployOutcome {
   noop: boolean;
 }
 
-interface CreatePlan {
+export interface CreatePlan {
   resolved: ResolvedCommand;
   env: Record<string, string>;
   intent: string;
   workspace: string;
+}
+
+/**
+ * Everything the state machine needs that is *not* the state machine.
+ *
+ * The split exists because two callers converge on one instance by two
+ * different routes. `deploy` arrives from the desktop holding an nsec and must
+ * materialise the sealed state directory before the agent can boot. `up`
+ * arrives from an operator's shell holding nothing but a path, and the state
+ * directory is already sealed — it has no secret, and must not need one.
+ *
+ * What they share is every hard part: the name election, generation tokens, pid
+ * signatures, log rotation, and the classification that decides whether a
+ * directory holds a live agent, a corpse, or a wedged startup. Duplicating that
+ * for the sake of one differing step is how the two drift apart.
+ */
+export interface StartSpec {
+  /** Derived from the secret by `deploy`, read from `identity.json` by `up`. */
+  agentPubkey: string;
+  config: ProviderConfig;
+  /**
+   * The create plan, computed lazily and at most once.
+   *
+   * Never called on the no-op path: resolving the agent binary can fail, and a
+   * Start that errored because the *command* setting had drifted — while the
+   * agent it was asked about was running perfectly well — would be a regression
+   * a user could not diagnose.
+   */
+  plan: (paths: InstancePaths) => CreatePlan;
+  /**
+   * Materialises the sealed state directory, inside the claim and before the
+   * spawn. A no-op for callers whose state directory already exists.
+   */
+  provision: (paths: InstancePaths, now: number) => Promise<void>;
+  /** `launch.command` from the desktop record: recorded, never executed. */
+  requestedCommand: string | null;
+  deps?: Partial<ReconcileDeps>;
 }
 
 const DEFAULT_DEPS: ReconcileDeps = {
@@ -117,21 +154,43 @@ function tailSuffix(logPath: string): string {
  * other by construction.
  */
 function planCreate(inputs: ReconcileInputs, paths: InstancePaths): CreatePlan {
-  const { payload, config } = inputs;
   const ambient = inputs.deps?.ambient ?? process.env;
-  const path = augmentedPath(ambient);
+  return planFromEnv({
+    config: inputs.config,
+    paths,
+    ambient,
+    env: (workspace, path) =>
+      buildAgentEnv({
+        payload: inputs.payload,
+        stateDir: paths.stateDir,
+        workspace,
+        generation: "",
+        logLevel: inputs.config.logLevel,
+        path,
+        ambient,
+      }),
+  });
+}
+
+/**
+ * Shared half of {@link planCreate}: everything downstream of an environment.
+ *
+ * `up` builds its environment from `identity.json` plus flags rather than from
+ * a deploy payload, but the command resolution, the workspace default and the
+ * fingerprint must be computed identically or the two callers would disagree
+ * about whether an instance matches its own intent.
+ */
+export function planFromEnv(inputs: {
+  config: ProviderConfig;
+  paths: InstancePaths;
+  env: (workspace: string, path: string) => Record<string, string>;
+  ambient?: NodeJS.ProcessEnv;
+}): CreatePlan {
+  const { config, paths } = inputs;
+  const path = augmentedPath(inputs.ambient ?? process.env);
   const resolved = resolveAgentCommand(config.command, path);
   const workspace = config.workspace ?? paths.workspace;
-
-  const env = buildAgentEnv({
-    payload,
-    stateDir: paths.stateDir,
-    workspace,
-    generation: "",
-    logLevel: config.logLevel,
-    path,
-    ambient,
-  });
+  const env = inputs.env(workspace, path);
 
   const intent = fingerprint({
     command: describeCommand(resolved),
@@ -206,24 +265,23 @@ async function terminate(
  * what makes concurrent Starts converge on one instance instead of failing.
  */
 async function create(
-  inputs: ReconcileInputs,
+  spec: StartSpec,
   paths: InstancePaths,
   plan: CreatePlan,
   deps: ReconcileDeps,
 ): Promise<boolean> {
-  const { payload } = inputs;
   const generation = randomBytes(8).toString("hex");
   const now = deps.now();
 
   ensureInstanceDirs(paths, plan.workspace);
 
   const record = newInstanceRecord({
-    agentPubkey: payload.agentPubkey,
+    agentPubkey: spec.agentPubkey,
     generation,
     createIntent: plan.intent,
     command: describeCommand(plan.resolved),
     args: [...AGENT_ARGS],
-    requestedCommand: payload.launch?.command ?? null,
+    requestedCommand: spec.requestedCommand,
     paths,
     workspace: plan.workspace,
     now,
@@ -234,7 +292,7 @@ async function create(
   if (!claimInstance(paths, record)) return false;
 
   try {
-    await provisionStateDir({ payload, stateDir: paths.stateDir, now });
+    await spec.provision(paths, now);
     // The log is per-generation, which is what makes "did this instance come
     // up?" answerable from disk by any later call.
     rotateLog(paths);
@@ -257,26 +315,27 @@ async function create(
   }
 }
 
-export async function deploy(inputs: ReconcileInputs): Promise<DeployOutcome> {
-  const { payload, config } = inputs;
-  const deps: ReconcileDeps = { ...DEFAULT_DEPS, ...inputs.deps };
+/**
+ * Converges on at most one live instance of `spec.agentPubkey` in this scope.
+ *
+ * The whole state machine lives here; `deploy` and `up` are the two ways to
+ * describe *what* to converge on. See {@link StartSpec}.
+ */
+export async function startInstance(spec: StartSpec): Promise<DeployOutcome> {
+  const { config } = spec;
+  const deps: ReconcileDeps = { ...DEFAULT_DEPS, ...spec.deps };
   const deadline = deps.now() + config.startupTimeoutSeconds * 1_000;
-  const paths = instancePaths(config.stateRoot, payload.agentPubkey);
+  const paths = instancePaths(config.stateRoot, spec.agentPubkey);
 
-  // Identity was derived from the nsec and the owner attestation verified in
-  // `parseDeployPayload`, before this function — before any mutation.
-  //
-  // The plan is computed lazily, and never at all on the no-op path. "Strict
-  // no-op" is easy to claim and easy to lose: resolving the agent binary can
-  // fail, and a Start that errored because the *command* setting had drifted —
-  // while the agent it was asked about was running perfectly well — would be a
-  // regression a user could not diagnose.
+  // Identity is established by the caller — derived from the nsec by `deploy`,
+  // read from the sealed record by `up` — before this function, and therefore
+  // before any mutation.
   let memoized: CreatePlan | null = null;
-  const plan = (): CreatePlan => (memoized ??= planCreate(inputs, paths));
+  const plan = (): CreatePlan => (memoized ??= spec.plan(paths));
   let attempted = false;
 
   for (;;) {
-    const record = readInstance(paths, payload.agentPubkey);
+    const record = readInstance(paths, spec.agentPubkey);
 
     /* ---- no instance ---------------------------------------------------- */
     if (record === null) {
@@ -287,7 +346,7 @@ export async function deploy(inputs: ReconcileInputs): Promise<DeployOutcome> {
         );
       }
       attempted = true;
-      await create(inputs, paths, plan(), deps);
+      await create(spec, paths, plan(), deps);
       continue;
     }
 
@@ -346,4 +405,22 @@ export async function deploy(inputs: ReconcileInputs): Promise<DeployOutcome> {
     }
     await deps.sleep(POLL_INTERVAL_MS);
   }
+}
+
+/**
+ * The provider's `deploy` op: converge, materialising the sealed state
+ * directory from the payload on the way.
+ */
+export async function deploy(inputs: ReconcileInputs): Promise<DeployOutcome> {
+  const { payload, config } = inputs;
+  return startInstance({
+    agentPubkey: payload.agentPubkey,
+    config,
+    plan: (paths) => planCreate(inputs, paths),
+    provision: async (paths, now) => {
+      await provisionStateDir({ payload, stateDir: paths.stateDir, now });
+    },
+    requestedCommand: payload.launch?.command ?? null,
+    deps: inputs.deps,
+  });
 }

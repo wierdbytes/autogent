@@ -20,7 +20,9 @@ import { fail } from "./wire.js";
 
 export type RespondTo = "owner-only" | "allowlist" | "anyone" | "nobody";
 
-const RESPOND_TO: ReadonlySet<string> = new Set([
+/** The legal `respond_to` values. Exported so `up` validates against this set
+ * rather than a second copy that can drift from it. */
+export const RESPOND_TO: ReadonlySet<string> = new Set([
   "owner-only",
   "allowlist",
   "anyone",

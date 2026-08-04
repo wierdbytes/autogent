@@ -28,6 +28,21 @@
 import type { DeployPayload } from "./payload.js";
 import { fail } from "./wire.js";
 
+/**
+ * The payload fields the environment is a function of.
+ *
+ * Deliberately narrower than {@link DeployPayload}: `secret`, `agentPubkey`,
+ * `auth` and `ownerPubkey` are absent by *type*, so the file docstring's
+ * "the identity is not in the environment at all" is checked rather than
+ * promised. It is also what lets a caller that has no secret — `autogent-nostr
+ * up`, which starts an already-sealed instance — reuse this function without
+ * inventing a fake key to satisfy the signature.
+ */
+export type EnvPayload = Pick<
+  DeployPayload,
+  "relayUrl" | "name" | "respondTo" | "respondToAllowlist" | "systemPrompt" | "model" | "envVars" | "launch"
+>;
+
 /** POSIX-shaped names only: a key like `FOO=BAR` would smuggle a second var. */
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -83,7 +98,7 @@ const POLICY_TRANSLATION: ReadonlyMap<string, string> = new Map([
 const AMBIENT_STRIPPED_PREFIXES: readonly string[] = ["AUTOGENT_", "BUZZ_"];
 
 export interface EnvInputs {
-  payload: DeployPayload;
+  payload: EnvPayload;
   stateDir: string;
   workspace: string;
   /** The per-attempt generation token; also the lifecycle correlator. */

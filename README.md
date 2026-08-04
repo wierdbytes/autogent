@@ -84,6 +84,31 @@ autogent-nostr doctor
 autogent-nostr run
 ```
 
+## Starting a deployed instance by hand
+
+When the agent was deployed by Buzz Desktop through `buzz-backend-autogent`, its
+identity, database and workspace live under `~/.buzz-autogent/instances/<id>/`.
+`up` starts such an instance in the background without the desktop — useful when
+Buzz will not offer Deploy (block/buzz#4730), or on a headless host:
+
+```bash
+autogent-nostr up --dry-run           # what would start, and where
+autogent-nostr up --model 'opus[1m]'  # start it, detached
+npm run agent:up -- --model 'opus[1m]'  # same, from a checkout
+```
+
+It runs the provider's own convergence, so `instance.json` ends up describing
+the process that is actually running — pid, process signature and a fresh
+generation — and the next desktop deploy adopts it instead of starting a second
+copy. It waits for the agent's own `agent online` line before reporting success,
+and it never reads the sealed key.
+
+`--agent <pubkey>` picks the instance when the root holds more than one. Model,
+system prompt and user env are not persisted by deploy, so pass them with
+`--model`, `--system-prompt` and `--env KEY=VALUE`, or via `AUTOGENT_*`. Stop it
+with `kill <pid>`: SIGTERM drains turns, publishes presence `offline` and closes
+the relay cleanly. `autogent-nostr run` remains the foreground equivalent.
+
 ## Adding the agent to a channel
 
 An agent cannot add itself — that needs an owner or admin signature, and the

@@ -15,6 +15,8 @@
     "build": "tsc -p tsconfig.build.json && node scripts/build-backend.mjs",
     "build:backend": "node scripts/build-backend.mjs",
     "backend": "node scripts/backend-run.mjs",
+    "agent:up": "node dist/cli.js up",
+    "agent:status": "node dist/cli.js up --dry-run",
     "backend:install": "mkdir -p \"$HOME/.local/bin\" && ln -sf \"$PWD/dist/backend/buzz-backend-autogent.cjs\" \"$HOME/.local/bin/buzz-backend-autogent\" && echo \"linked $HOME/.local/bin/buzz-backend-autogent\"",
     "dev-relay": "node scripts/dev-relay.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",

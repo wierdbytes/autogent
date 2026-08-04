@@ -258,6 +258,46 @@ point of the package it was bundled from, as `node <pkg>/dist/cli.js`, and only
 while that file still exists on disk. Both routes exec Node directly, so the
 SIGTERM path of I5 is unaffected by which one is taken.
 
+## Starting an instance without the desktop
+
+`autogent-nostr up` starts an instance a previous `deploy` already provisioned.
+It exists because the desktop is not always able to ask for one: Buzz 0.5.4
+derives a provider-backed agent's status solely from the stored
+`backend_agent_id` (`desktop/src-tauri/src/managed_agents/runtime.rs`), which is
+never cleared, so after `!shutdown` the primary action stays *Shutdown* and
+never becomes *Deploy* — there is no UI route back up (block/buzz#4730).
+
+```bash
+autogent-nostr up --dry-run          # resolve and report, mutate nothing
+autogent-nostr up --model 'opus[1m]' # start it, detached
+```
+
+It is the same convergence the provider runs, not a parallel launcher: name
+election, generation token, pid plus process signature, log rotation and
+startup confirmation all come from `startInstance` in `reconcile.ts`, which
+`deploy` also calls. A live instance is adopted untouched; a dead one is
+replaced; either way `instance.json` describes the process that is really
+running, so the next desktop deploy recognises it.
+
+Two differences from `deploy`, both deliberate:
+
+- **It never reads the sealed key.** `deploy` needs the nsec only to materialise
+  a state directory that here already exists, and `IdentityStore` offers no way
+  to read raw key bytes back out. The environment the agent boots with is a
+  function of the public half of `identity.json` — see `EnvPayload` in `env.ts`,
+  which states that in the type system rather than in a comment.
+- **Model, system prompt and user env are not recovered.** They arrive in the
+  deploy payload and are deliberately not persisted: the provider treats every
+  env value as potentially secret (`redact.ts`), and writing them into
+  `instance.json` would create a plaintext secrets-at-rest surface that does not
+  exist today. `up` takes them from flags (`--model`, `--system-prompt`,
+  `--env KEY=VALUE`) or from `AUTOGENT_*` in its own environment, so their
+  absence is a visible default rather than a silent one.
+
+Selection is `--agent <pubkey-or-prefix>` within `--state-root`, and is optional
+when the root holds exactly one instance. Ambiguity is an error that lists the
+candidates with their liveness rather than a guess.
+
 ## What is not covered
 
 - **Malicious-provider containment** is not claimed by anyone, here or upstream:

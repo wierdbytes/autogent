@@ -26,6 +26,7 @@ import {
 import { ARGV_SECRET_WARNING, type OwnerSecretSource } from "./provisioning/owner-secret.js";
 import { createIdentityStore, ProvisioningError } from "./provisioning/identity-store.js";
 import { initIdentity, initInstructions } from "./provisioning/init.js";
+import { formatUpResult, up } from "./backend/up.js";
 import { ProfileReconciler } from "./nostr/profile.js";
 import { createEventBuilder } from "./nostr/event-builder.js";
 import { RelaySupervisor } from "./nostr/relay-supervisor.js";
@@ -47,6 +48,11 @@ Usage:
   autogent-nostr profile sync
   autogent-nostr doctor
   autogent-nostr run
+  autogent-nostr up [--agent <pubkey>] [--state-root <dir>] [--relay <url>]
+                    [--name <name>] [--model <id>] [--system-prompt <text>]
+                    [--respond-to <mode>] [--allowlist <hex,hex>]
+                    [--env KEY=VALUE ...] [--command <path>] [--workspace <dir>]
+                    [--log-level <level>] [--timeout <seconds>] [--dry-run]
 
 Commands:
   init              Generate the agent identity and a pairing request (agent host).
@@ -56,7 +62,16 @@ Commands:
   channel remove    Remove a member from a channel (OWNER host).
   profile sync      Republish kind 0 / kind 10100 if they are missing or stale.
   doctor            Check identity, permissions, configuration and Pi availability.
-  run               Start the agent.
+  run               Start the agent in the foreground (this process becomes it).
+  up                Start a provider-provisioned instance in the background.
+
+up is the manual counterpart to Buzz Desktop's Deploy: it starts an instance a
+previous deploy already provisioned, detaching the agent, recording its pid and
+generation in instance.json, and waiting for the agent's own "online" line
+before reporting success. It never reads the sealed key. Model, system prompt
+and user env are not persisted by deploy, so up takes them from flags or from
+AUTOGENT_* in its own environment; everything else comes from identity.json.
+With one instance under --state-root, --agent is optional.
 
 The channel commands default --pubkey to this host's agent and --role to bot.
 The owner key is read interactively unless --owner-private-key is given; passing
@@ -68,12 +83,15 @@ Configuration comes from AUTOGENT_* environment variables; see README.
 interface Flags {
   positional: string[];
   values: Map<string, string>;
+  /** Every occurrence, in order. `values` keeps only the last, as before. */
+  repeated: Map<string, string[]>;
   booleans: Set<string>;
 }
 
 function parseFlags(argv: string[]): Flags {
   const positional: string[] = [];
   const values = new Map<string, string>();
+  const repeated = new Map<string, string[]>();
   const booleans = new Set<string>();
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -89,9 +107,60 @@ function parseFlags(argv: string[]): Flags {
       continue;
     }
     values.set(name, next);
+    repeated.set(name, [...(repeated.get(name) ?? []), next]);
     index += 1;
   }
-  return { positional, values, booleans };
+  return { positional, values, repeated, booleans };
+}
+
+/** `--env KEY=VALUE`, repeatable. Later occurrences win, as in a shell. */
+function parseEnvFlags(flags: Flags): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const entry of flags.repeated.get("env") ?? []) {
+    const split = entry.indexOf("=");
+    if (split <= 0) {
+      throw new Error(`--env expects KEY=VALUE, got ${JSON.stringify(entry)}`);
+    }
+    out[entry.slice(0, split)] = entry.slice(split + 1);
+  }
+  return out;
+}
+
+function numberFlag(flags: Flags, name: string): number | undefined {
+  const raw = flags.values.get(name);
+  if (raw === undefined) return undefined;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) throw new Error(`--${name} must be a number, got ${raw}`);
+  return parsed;
+}
+
+async function commandUp(flags: Flags): Promise<number> {
+  const envVars = parseEnvFlags(flags);
+  const allowlist = flags.values.get("allowlist");
+  const result = await up({
+    agent: flags.values.get("agent") ?? flags.positional[0],
+    stateRoot: flags.values.get("state-root"),
+    relayUrl: flags.values.get("relay"),
+    name: flags.values.get("name"),
+    respondTo: flags.values.get("respond-to"),
+    respondToAllowlist:
+      allowlist === undefined
+        ? undefined
+        : allowlist
+            .split(",")
+            .map((item) => item.trim())
+            .filter((item) => item !== ""),
+    systemPrompt: flags.values.get("system-prompt"),
+    model: flags.values.get("model"),
+    envVars: Object.keys(envVars).length === 0 ? undefined : envVars,
+    command: flags.values.get("command"),
+    workspace: flags.values.get("workspace"),
+    startupTimeoutSeconds: numberFlag(flags, "timeout"),
+    logLevel: flags.values.get("log-level"),
+    dryRun: flags.booleans.has("dry-run"),
+  });
+  process.stdout.write(formatUpResult(result));
+  return 0;
 }
 
 async function commandInit(flags: Flags): Promise<number> {
@@ -310,6 +379,8 @@ export async function main(argv: string[]): Promise<number> {
       return commandDoctor();
     case "config":
       return commandConfig();
+    case "up":
+      return commandUp(flags);
     case "run":
     case undefined:
       return run();
