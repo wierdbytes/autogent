@@ -72,6 +72,6 @@ echo "  3. merge it into ~/.kube/config and rename the context (see header)"
 echo
 echo "provider_config for Buzz Desktop:"
 echo '  { "kube_context": "k3s-agents", "namespace": "autogent",'
-echo '    "image": "ghcr.io/wierdbytes/autogent@sha256:<digest>",'
+echo '    "image": "ghcr.io/wierdbytes/autogent:latest",'
 echo '    "storage_class": "local-path", "storage_size": "2Gi",'
 echo '    "inactivity_seconds": 7200 }'

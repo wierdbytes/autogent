@@ -95,4 +95,4 @@ Buzz Desktop → Deploy. Провайдер: новый generation-Secret → з
 | конфиг агента | engram `core` (kind 30174), шифртекст NIP-44 |
 | OAuth-креды | engram `mem/provider-auth` + `~/.config/autogent/agents/<pubkey>/auth.json` на owner-машине |
 | состояние/workspace | PVC `autogent-<pubkey12>-data`, смонтирован в `/data` |
-| образ | `ghcr.io/wierdbytes/autogent` (деплой только по digest) |
+| образ | `ghcr.io/wierdbytes/autogent` (тег резолвится в digest при деплое; Pod всегда digest-pinned) |

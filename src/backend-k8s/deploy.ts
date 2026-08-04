@@ -26,6 +26,7 @@ import {
   secretName,
 } from "./names.js";
 import { podObject, pvcObject, secretObject, type AgentObjectsInput } from "./manifests.js";
+import { resolveImageDigest } from "./resolve-image.js";
 import { toNostrTag } from "../nostr/nip-oa.js";
 
 const STARTUP_TIMEOUT_MS = 120_000;
@@ -39,6 +40,7 @@ export interface K8sDeployInput {
   /** Injected in tests. */
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  resolveImage?: (ref: string) => Promise<string>;
 }
 
 export interface K8sDeployOutcome {
@@ -68,11 +70,15 @@ export async function deployToK8s(input: K8sDeployInput): Promise<K8sDeployOutco
     providerAuthJson,
   });
 
+  // Tag → digest before any object exists: the Pod is always digest-pinned,
+  // even though the GUI accepts a mutable tag (resolve-image.ts).
+  const image = await (input.resolveImage ?? resolveImageDigest)(config.image);
+
   const generation = newGeneration();
   const objects: AgentObjectsInput = {
     agentPubkey: payload.agentPubkey,
     generation,
-    config,
+    config: { ...config, image },
     nsec: input.nsec,
     relayUrl: payload.relayUrl,
     authTagJson: JSON.stringify(toNostrTag(payload.auth)),

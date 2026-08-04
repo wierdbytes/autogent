@@ -14,6 +14,7 @@ import { buildCoreConfig, buildPodEnv } from "../src/backend-k8s/engrams.js";
 import { deployToK8s, podVerdict } from "../src/backend-k8s/deploy.js";
 import { handleRequest } from "../src/backend-k8s/main.js";
 import { podObject, pvcObject, secretObject, type AgentObjectsInput } from "../src/backend-k8s/manifests.js";
+import { parseImageRef, resolveImageDigest } from "../src/backend-k8s/resolve-image.js";
 import { agentSelector, podName, pvcName, secretName } from "../src/backend-k8s/names.js";
 import { mintAgent } from "./helpers/backend-request.js";
 
@@ -36,14 +37,20 @@ describe("provider_config", () => {
     });
   });
 
-  it("refuses a mutable tag image (this object runs with the agent's key)", () => {
-    expect(() => config({ image: "ghcr.io/wierdbytes/autogent:latest" })).toThrow(
-      /not digest-pinned/,
+  it("accepts a tag reference (resolved to a digest at deploy)", () => {
+    expect(config({ image: "ghcr.io/wierdbytes/autogent:latest" }).image).toBe(
+      "ghcr.io/wierdbytes/autogent:latest",
     );
   });
 
-  it("requires the image", () => {
-    expect(() => parseK8sProviderConfig({})).toThrow(/image is required/);
+  it("defaults the image to the published :latest tag", () => {
+    expect(parseK8sProviderConfig({}).image).toBe("ghcr.io/wierdbytes/autogent:latest");
+  });
+
+  it("refuses a malformed digest (must not silently parse as a tag)", () => {
+    expect(() => config({ image: "ghcr.io/wierdbytes/autogent@sha256:abc" })).toThrow(
+      /neither a tag reference nor digest-pinned|neither a tag/,
+    );
   });
 
   it("accepts 0 as the legal indefinite lifetime", () => {
@@ -243,17 +250,75 @@ describe("deploy refusal order", () => {
     ).rejects.toThrow(/relay-mesh|shared compute/);
   });
 
-  it("refuses a tag-pinned image (fixture parity)", async () => {
-    const minted = mintAgent();
-    await expect(
-      handleRequest(
-        JSON.stringify({
-          op: "deploy",
-          agent: minted.agent,
-          provider_config: { image: "ghcr.io/wierdbytes/autogent:latest" },
-        }),
-      ),
-    ).rejects.toThrow(/digest-pinned/);
+});
+
+describe("resolveImageDigest", () => {
+  const DIGEST = `sha256:${"b".repeat(64)}`;
+
+  function fakeFetch(routes: (url: string, init?: RequestInit) => Response): typeof fetch {
+    return (async (input: string | URL | Request, init?: RequestInit) =>
+      routes(String(input), init)) as typeof fetch;
+  }
+
+  it("returns digest-pinned references unchanged", async () => {
+    const pinned = `ghcr.io/wierdbytes/autogent@${DIGEST}`;
+    expect(await resolveImageDigest(pinned, fakeFetch(() => Response.error()))).toBe(pinned);
+  });
+
+  it("resolves a tag via the anonymous bearer-challenge flow (ghcr shape)", async () => {
+    const calls: string[] = [];
+    const impl = fakeFetch((url, init) => {
+      calls.push(url);
+      if (url.startsWith("https://ghcr.io/v2/")) {
+        const auth = (init?.headers as Record<string, string>)?.["authorization"];
+        if (auth !== "Bearer anon-token") {
+          return new Response(null, {
+            status: 401,
+            headers: {
+              "www-authenticate":
+                'Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:wierdbytes/autogent:pull"',
+            },
+          });
+        }
+        return new Response(null, { status: 200, headers: { "docker-content-digest": DIGEST } });
+      }
+      if (url.startsWith("https://ghcr.io/token")) {
+        return new Response(JSON.stringify({ token: "anon-token" }), { status: 200 });
+      }
+      return new Response(null, { status: 500 });
+    });
+
+    expect(await resolveImageDigest("ghcr.io/wierdbytes/autogent:0.1.1", impl)).toBe(
+      `ghcr.io/wierdbytes/autogent@${DIGEST}`,
+    );
+    expect(calls.some((url) => url.includes("scope=repository%3Awierdbytes%2Fautogent%3Apull"))).toBe(
+      true,
+    );
+  });
+
+  it("surfaces a missing tag as an actionable error", async () => {
+    const impl = fakeFetch(() => new Response(null, { status: 404 }));
+    await expect(resolveImageDigest("ghcr.io/wierdbytes/autogent:nope", impl)).rejects.toThrow(
+      /not found .* check the tag/s,
+    );
+  });
+
+  it("refuses registries that demand real credentials", async () => {
+    const impl = fakeFetch(
+      () => new Response(null, { status: 401, headers: { "www-authenticate": 'Basic realm="x"' } }),
+    );
+    await expect(resolveImageDigest("ghcr.io/wierdbytes/private:1", impl)).rejects.toThrow(
+      /must be public/,
+    );
+  });
+
+  it("parses bare Docker Hub names under library/", () => {
+    expect(parseImageRef("nginx")).toEqual({
+      registry: "registry-1.docker.io",
+      repository: "library/nginx",
+      tag: "latest",
+      name: "nginx",
+    });
   });
 });
 

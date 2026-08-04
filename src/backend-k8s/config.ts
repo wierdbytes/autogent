@@ -3,13 +3,16 @@
  *
  * Flat scalars only, no secret-shaped keys (I2): substrate credentials are
  * ambient — the kubeconfig on the owner's machine — and only a *context name*
- * appears here. The image must be digest-pinned: a tag is a mutable pointer,
- * and this object runs with the agent's private key.
+ * appears here. The image may be given as a human-friendly tag (the GUI
+ * default); it is resolved to a digest at deploy time (resolve-image.ts), so
+ * the Pod itself never follows a mutable pointer.
  */
 
 import { fail } from "../backend/wire.js";
+import { DIGEST_RE } from "./resolve-image.js";
 
 export const DEFAULT_NAMESPACE = "autogent";
+export const DEFAULT_IMAGE = "ghcr.io/wierdbytes/autogent:latest";
 export const DEFAULT_STORAGE_SIZE = "2Gi";
 export const DEFAULT_INACTIVITY_SECONDS = 7200;
 
@@ -17,7 +20,7 @@ export interface K8sProviderConfig {
   /** kubeconfig context name; empty means the current context. */
   kubeContext: string | null;
   namespace: string;
-  /** Digest-pinned image reference, `name@sha256:<64 hex>`. */
+  /** Image reference: `name:tag` (resolved to a digest at deploy) or `name@sha256:<64 hex>`. */
   image: string;
   storageClass: string | null;
   storageSize: string;
@@ -26,7 +29,9 @@ export interface K8sProviderConfig {
 }
 
 const NAMESPACE_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
-const DIGEST_RE = /@sha256:[0-9a-f]{64}$/;
+// A tag reference: optional registry/repo path, optional `:tag`. No `@` — a
+// half-typed digest must not silently parse as a tag.
+const TAG_REF_RE = /^[a-z0-9][a-z0-9._:/-]*$/i;
 const QUANTITY_RE = /^[0-9]+(\.[0-9]+)?(Mi|Gi|Ti)$/;
 
 function asObject(value: unknown): Record<string, unknown> | null {
@@ -51,12 +56,11 @@ export function parseK8sProviderConfig(raw: unknown): K8sProviderConfig {
     fail(`provider_config.namespace ${JSON.stringify(namespace)} is not a valid k8s namespace name`);
   }
 
-  const image = optionalString(object, "image");
-  if (image === null) fail("provider_config.image is required (ghcr.io/wierdbytes/autogent@sha256:…)");
-  if (!DIGEST_RE.test(image)) {
+  const image = optionalString(object, "image") ?? DEFAULT_IMAGE;
+  if (!DIGEST_RE.test(image) && !TAG_REF_RE.test(image)) {
     fail(
-      `provider_config.image ${JSON.stringify(image)} is not digest-pinned: a tag is a mutable ` +
-        `pointer, and this object runs with the agent's private key. Use name@sha256:<64 hex chars>`,
+      `provider_config.image ${JSON.stringify(image)} is neither a tag reference ` +
+        `(name:tag) nor digest-pinned (name@sha256:<64 hex chars>)`,
     );
   }
 
@@ -104,7 +108,9 @@ export function k8sConfigSchema(): Record<string, unknown> {
       },
       image: {
         type: "string",
-        description: "Digest-pinned agent image, e.g. ghcr.io/wierdbytes/autogent@sha256:…",
+        description:
+          `Agent image tag (resolved to a digest at deploy) or name@sha256:… (default ${DEFAULT_IMAGE})`,
+        default: DEFAULT_IMAGE,
       },
       storage_class: {
         type: "string",
@@ -121,6 +127,6 @@ export function k8sConfigSchema(): Record<string, unknown> {
         default: DEFAULT_INACTIVITY_SECONDS,
       },
     },
-    required: ["image"],
+    required: [],
   };
 }

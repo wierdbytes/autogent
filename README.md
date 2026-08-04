@@ -339,7 +339,8 @@ Setup, in order:
 # once, on the owner machine:     merge kubeconfig, rename context (script prints how)
 npm run backend:install           # links both providers into ~/.local/bin
 autogent-nostr auth login --agent <pubkey> --relay wss://…
-# then in Buzz Desktop: provider "autogent-k8s", set the digest-pinned image, Deploy
+# then in Buzz Desktop: provider "autogent-k8s" — the image defaults to
+# ghcr.io/wierdbytes/autogent:latest (tag is resolved to a digest at deploy), Deploy
 ```
 
 Manifests for the namespace and the egress NetworkPolicy are in
