@@ -25,17 +25,40 @@ else
   echo "==> k3s already installed, skipping"
 fi
 
-echo "==> waiting for the node to be Ready"
+echo "==> waiting for the node to register"
+# `kubectl wait` errors out when the resource does not exist yet, and right
+# after `systemd start` the Node object has not been created — poll for
+# registration first, then wait for readiness.
+for _ in $(seq 1 90); do
+  if sudo k3s kubectl get nodes --no-headers 2>/dev/null | grep -q .; then
+    break
+  fi
+  sleep 2
+done
+if ! sudo k3s kubectl get nodes --no-headers 2>/dev/null | grep -q .; then
+  echo "node never registered; inspect: journalctl -u k3s --no-pager | tail -50" >&2
+  exit 1
+fi
 sudo k3s kubectl wait --for=condition=Ready node --all --timeout=180s
 
 echo "==> applying namespace and network policy"
-if [ -f "${SCRIPT_DIR}/k8s/namespace.yaml" ]; then
-  sudo k3s kubectl apply -f "${SCRIPT_DIR}/k8s/namespace.yaml"
-  sudo k3s kubectl apply -f "${SCRIPT_DIR}/k8s/networkpolicy.yaml"
-else
-  sudo k3s kubectl create namespace autogent --dry-run=client -o yaml | sudo k3s kubectl apply -f -
-  echo "    (networkpolicy.yaml not found next to this script — apply it manually)"
-fi
+apply_manifest() { # $1 = filename under deploy/k8s/
+  if [ -f "${SCRIPT_DIR}/k8s/$1" ]; then
+    sudo k3s kubectl apply -f "${SCRIPT_DIR}/k8s/$1"
+    return
+  fi
+  # curl | bash leaves no files next to the script — fetch from the repo.
+  local url
+  for branch in master main; do
+    url="https://raw.githubusercontent.com/wierdbytes/autogent/${branch}/deploy/k8s/$1"
+    if curl -fsSL "$url" | sudo k3s kubectl apply -f -; then
+      return
+    fi
+  done
+  echo "    could not fetch $1 — apply it manually from deploy/k8s/" >&2
+}
+apply_manifest namespace.yaml
+apply_manifest networkpolicy.yaml
 
 echo "==> local-path storage class (k3s default)"
 sudo k3s kubectl get storageclass local-path -o name
