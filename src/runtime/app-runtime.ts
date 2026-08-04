@@ -25,6 +25,7 @@ import {
   watchAuthFile,
 } from "./provider-auth.js";
 import { applyCoreConfig, parseCoreConfig } from "./remote-config.js";
+import { buildRelayTools, httpOriginOf, type RelayToolSet } from "../tools/index.js";
 import { createEventBuilder, type AgentEventBuilder } from "../nostr/event-builder.js";
 import { MembershipManager, type ChannelInfo } from "../nostr/memberships.js";
 import { PresencePublisher } from "../nostr/presence.js";
@@ -149,6 +150,7 @@ export class AppRuntime {
   #authHeadCreatedAt = 0;
   #stopAuthWatcher: (() => void) | null = null;
   readonly #inactivity: InactivityMonitor;
+  readonly #relayTools: RelayToolSet;
   #stopReason: string | null = null;
   /** Serialises roster republication; the dirty flag collapses bursts. */
   #profileSync: Promise<void> = Promise.resolve();
@@ -240,6 +242,24 @@ export class AppRuntime {
       pi: this.#config.pi,
     });
 
+    this.#relayTools = buildRelayTools({
+      relay: this.#relay,
+      signer: this.#signer,
+      builder: this.#builder,
+      clock: this.#clock,
+      logger: this.#logger.child({ component: "tools" }),
+      knownChannels: () =>
+        new Set(
+          this.#state.channels
+            .active(this.#config.relayId)
+            .map((channel) => channel.channelId),
+        ),
+      workspaceDir: this.#config.pi.cwd,
+      httpOrigin: httpOriginOf(this.#config.relayUrl),
+      maxMediaBytes: 32 * 1024 * 1024,
+      sendChat: async (channelId, content, reply) => this.#sendToolChat(channelId, content, reply),
+    });
+
     this.#sessions =
       options.sessions ??
       new SessionRegistry({
@@ -247,6 +267,7 @@ export class AppRuntime {
         channels: this.#state.channels,
         relayId: this.#config.relayId,
         logger: this.#logger.child({ component: "sessions" }),
+        customTools: this.#relayTools.tools,
       });
 
     this.#context = new ContextFetcher({
@@ -421,6 +442,7 @@ export class AppRuntime {
     this.#telemetry.close();
     await this.#withDeadline(this.#outboxPublisher.stop(), drainDeadline, "outbox-stop");
 
+    this.#relayTools.gitProxy.close();
     // The roster entry is the one thing that outlives this process on the relay,
     // so its last word must not be "online".
     await this.#announceOffline();
@@ -742,6 +764,34 @@ export class AppRuntime {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+
+  /**
+   * `send_message` transport (remote plan §5.4): same durable outbox as the
+   * auto-reply — record, sign, publish, confirm — so a relay outage cannot
+   * silently drop a tool-sent message either.
+   */
+  async #sendToolChat(
+    channelId: string,
+    content: string,
+    reply: { rootEventId: string } | null,
+  ): Promise<{ eventId: string }> {
+    const tags: string[][] = [["h", channelId]];
+    // NIP-10: threading under an existing root uses a single `root` marker.
+    if (reply) tags.push(["e", reply.rootEventId, "", "root"]);
+    const event = this.#builder.build({ kind: KIND.CHAT, content, tags });
+    this.#state.outbox.putSigned({
+      logicalId: `tool-send:${event.id}`,
+      eventId: event.id,
+      kind: KIND.CHAT,
+      signedEvent: event,
+      state: "pending",
+      attempts: 0,
+      nextRetryAt: this.#clock.now(),
+      lastError: null,
+    });
+    this.#outboxPublisher.notify();
+    return { eventId: event.id };
   }
 
   #maybeLeaveDegraded(): void {

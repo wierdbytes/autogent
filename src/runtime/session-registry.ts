@@ -113,6 +113,11 @@ export interface SessionRegistryDeps {
   channels: ChannelRepository;
   relayId: string;
   logger: Logger;
+  /**
+   * Relay tools (remote plan §5), registered on every session as the SDK's
+   * `customTools`. Opaque here — the registry does not interpret them.
+   */
+  customTools?: unknown[];
   /** Injected for tests; defaults to importing the real SDK. */
   loadSdk?: () => Promise<SdkModule>;
 }
@@ -221,6 +226,9 @@ export class SessionRegistry implements SessionRegistryPort {
       ...(config.tools ? { tools: config.tools } : {}),
       ...(config.excludeTools ? { excludeTools: config.excludeTools } : {}),
       ...(resourceLoader ? { resourceLoader } : {}),
+      ...(this.deps.customTools && this.deps.customTools.length > 0
+        ? { customTools: this.deps.customTools }
+        : {}),
     });
 
     this.deps.channels.setPiSession(

@@ -32,6 +32,8 @@ export interface NostrFilter {
   since?: number;
   until?: number;
   limit?: number;
+  /** NIP-50 full-text query; results come back relevance-sorted. */
+  search?: string;
   [tagFilter: `#${string}`]: string[] | undefined | number | number[] | string;
 }
 
