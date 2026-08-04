@@ -37,10 +37,10 @@ provider has no `status` or `stop` operation to offer.
 | `buzz.block.xyz/create-intent` annotation | `create_intent` (SHA-256 over the same class of inputs) |
 | per-attempt Secret `…-<gen>` holding the identity | per-agent sealed state directory + per-attempt `generation` token |
 | container `state.running` = started | the agent's own `"agent online"` log line |
-| `resourceVersion`-unset quorum read | a fresh `readFileSync` + `ps` probe |
+| `resourceVersion`-unset quorum read | a fresh `readFileSync` + a `kill(pid, 0)` liveness check and a `ps` start-time signature |
 | UID + `resourceVersion` delete precondition | re-read of the online marker and the generation immediately before the signal |
 | `Status.reason` 409 discriminator | `EEXIST` from an exclusive (`wx`) create |
-| `terminationGracePeriodSeconds: 60` | 60s between SIGTERM and SIGKILL |
+| `terminationGracePeriodSeconds: 60` | up to 60s between SIGTERM and SIGKILL, capped by the deploy deadline |
 | `restartPolicy: Never` | no supervisor at all |
 | Completed pod kept for forensics until next deploy | `agent.log` rotated to `agent.prev.log` on the next create |
 
@@ -66,6 +66,17 @@ with a message that says so. The attestation is verified against the pubkey
 **derived from the nsec**, so a payload cannot hand over an attestation minted
 for a different key.
 
+Three further refusals sit on the same pre-mutation path. A self-attested tag —
+owner and agent pubkeys identical — is rejected, because it grants nothing. So
+is a tag whose `conditions` fail to cover every kind `autogent-nostr` publishes,
+evaluated at the current instant, so an attestation that stops covering them
+tomorrow is refused tomorrow rather than stranding the agent mid-flight. So is a
+`launch.owner_pubkey` that disagrees with the owner named in the tag: the
+provider refuses rather than guess which owner may stop the agent. An
+`agent.provider` of `relay-mesh` is refused outright — that transport resolves
+to a loopback proxy on the desktop, so a deployed agent would point at its own
+localhost.
+
 **I2 — no secrets in configuration.** The five config fields are `command`,
 `state_root`, `workspace`, `startup_timeout_seconds`, `log_level`. None of them
 can hold a credential, and a test reproduces the desktop's anti-secret key-name
@@ -73,11 +84,21 @@ lint and runs it against the schema, so a future field cannot be named into a
 deploy-time rejection.
 
 **I3 — presence is the status.** The agent publishes kind 20001 as it always
-does. Two knobs that would silently un-make that promise are refused in user
+does, and republishes its kind 10100 roster entry — carrying `status` and the
+current `channel_ids` — on every membership change. Both are load-bearing for
+the desktop: presence answers *is it alive*, and the roster entry is where the
+Stop button finds a channel to address, so an agent whose roster entry lists no
+channels cannot be stopped from the UI at all. Republication is serialised and
+coalesced, and a failed publish leaves the entry dirty for the next change to
+retry rather than taking down an agent that is otherwise answering.
+
+Two knobs that would silently un-make the presence promise are refused in user
 env: `BUZZ_ACP_NO_PRESENCE` and a falsy `AUTOGENT_PRESENCE`. The staleness bound
 is the relay's, unchanged; the *avoidable* half is minimised by giving the agent
-60 seconds of graceful shutdown before SIGKILL, which is enough for it to drain,
-publish presence `offline` and close the relay connection.
+up to 60 seconds of graceful shutdown before SIGKILL — enough for it to drain,
+republish the roster entry as `offline`, publish presence `offline` and close the
+relay connection. The window is `min(60s, remaining deploy deadline)`, so a
+short `startup_timeout_seconds` buys the agent less than the full minute.
 
 **I4 — at most one live instance per key per scope.** The instance record is
 created with an exclusive (`wx`) write, so the filesystem elects the winner of a
@@ -88,8 +109,12 @@ key into two scopes is user error with confusing-but-safe results, not a safety
 violation.
 
 **I5 — intentional termination is final.** Owner `!shutdown` reaches the agent
-over the relay, is verified against the owner pubkey, and runs the graceful
-shutdown path. SIGTERM lands on the agent process itself — there is no shell, no
+as an ordinary chat event in one of the channels its roster entry advertises.
+Three conditions gate it — the event is a chat kind, its author is the owner,
+and the agent is genuinely `p`-tagged — and any one of them failing leaves the
+event on the normal message path instead of consuming it, because anyone in a
+channel can type the word. When all three hold it runs the graceful shutdown
+path. SIGTERM lands on the agent process itself — there is no shell, no
 `npm run`, no wrapper to swallow it. Nothing restarts the process, so "a clean
 exit is never resurrected" holds vacuously, which is the honest form of this
 invariant for a substrate with no supervision.
@@ -109,9 +134,10 @@ pool-independent reaper timer to the agent first.
    single-purpose: it deploys one agent, in-process on the Pi SDK. A desktop
    record configured for `goose` or `claude-agent-acp` still gets
    `autogent-nostr`. The requested command is written into `instance.json` as
-   `requested_command` so the substitution is visible on disk rather than
-   invisible everywhere. `launch.command`/`launch.args` are therefore recorded,
-   not executed.
+   `requested_command`, so the substitution is visible on disk rather than
+   invisible everywhere. `launch.args` is validated and then dropped: the agent
+   is always invoked as `autogent-nostr run`, and the record's `args` field
+   holds those executed arguments rather than the requested ones.
 
 2. **Identity is delivered on disk, not in the environment.** The Kubernetes
    binding passes the nsec through `envFrom` a Secret. A local process's
@@ -128,14 +154,18 @@ pool-independent reaper timer to the agent first.
    "the namespace is the isolation unit".
 
 3. **`launch.policy_env` is translated, not just forwarded.** Its `BUZZ_ACP_*`
-   names address a harness that is not running here. The four with exact
-   counterparts (`MODEL`, `IDLE_TIMEOUT`, `MAX_TURN_DURATION`, `AGENTS`) become
-   `AUTOGENT_*` at **tier 1**, keeping their overridable status — locally the
-   desktop writes them before the user env layer, and a provider that mapped
-   them afterwards would silently defeat an override that works locally.
-   `BUZZ_ACP_TEAM_INSTRUCTIONS` is concatenated onto the system prompt, because
-   it is the one policy value no substrate can reconstruct and the agent has a
-   single appended-prompt knob. The originals are still passed through.
+   names address a harness that is not running here. Four knobs have a
+   counterpart and are translated at **tier 1**, keeping their overridable
+   status: `MODEL`, `IDLE_TIMEOUT` and `MAX_TURN_DURATION` to the same-suffix
+   `AUTOGENT_*`, and `BUZZ_ACP_AGENTS` to `AUTOGENT_MAX_CONCURRENT_TURNS`, which
+   is the knob it actually addresses. Tier 1 is where they belong because
+   locally the desktop writes them before the user env layer, and a provider
+   that mapped them afterwards would silently defeat an override that works
+   locally. `BUZZ_ACP_SYSTEM_PROMPT` takes precedence over the record's
+   `system_prompt`, and `BUZZ_ACP_TEAM_INSTRUCTIONS` is concatenated onto
+   whichever of the two wins, because it is the one policy value no substrate
+   can reconstruct and the agent has a single appended-prompt knob. The
+   originals are still passed through.
 
 4. **The ambient `AUTOGENT_*` and `BUZZ_*` environment is stripped.** The child
    inherits the desktop's environment — that is how the Pi provider credential,
@@ -151,6 +181,16 @@ pool-independent reaper timer to the agent first.
 the desktop discard stdout and the explanation with it. The only non-zero exit
 is an unreadable stdin, where no response can be composed.
 
+**Redaction applies to text, never to structure.** Error messages are scrubbed
+of `nsec1…` and `sprt_tok_…` tokens and of every payload env value of four
+characters or more — minus the JSON literals `true`, `false` and `null`, which a
+real payload does set and which carry no entropy beyond the name of the key
+holding them. The scrub runs on the message; the response envelope is serialised
+afterwards and never passed through it, because rewriting finished JSON turns
+`{"ok":true,…}` into something the desktop reads as no response at all. Buzz
+Desktop scrubs provider output on its own side too — this half exists for the
+runs where nothing sits between stdout and a terminal.
+
 **The `info` response is a closed set.** The desktop validates it against an
 allowlist of exactly `ok`, `name`, `version`, `protocol_version`, `description`,
 `config_schema`. A test pins the key set, because adding a helpful field here
@@ -162,11 +202,17 @@ its profile and subscribed. A successful `spawn` proves only that the kernel
 accepted an image.
 
 **A deadline never destroys anything.** `startup_timeout_seconds` bounds how
-long one Start waits, nothing more. A still-starting instance is observed and
-left alone, on that call and every later one; the next Start adopts whatever it
-became. What replaces a never-started instance is a **change of intent** — the
-user editing the configuration it is wedged on — which is the only escape from a
-wedge and is not clocked to anything.
+long one Start waits, and with it the window a terminating instance is given to
+disappear; it authorises no deletion of its own. A still-starting instance is
+observed and left alone, on that call and every later one; the next Start adopts
+whatever it became. What replaces a never-started instance is a **change of
+intent** — the user editing the configuration it is wedged on — which is the
+only escape from a wedge and is not clocked to anything.
+
+The field is capped at 600 seconds, which is also the desktop's own `deploy`
+timeout. Set near the cap it stops being useful: the desktop kills the provider
+before it can compose an in-band answer, and the one bit an exit code carries is
+all that survives.
 
 **Destructive steps are fenced.** Nothing is deleted unless the record carries
 the management marker and the full agent pubkey. Immediately before signalling a
@@ -205,6 +251,12 @@ on stderr**, which the desktop displays. That is strictly better than the bare
 status code it replaces, and it is the reason the search does not simply fall
 through to an empty `exec`. The same PATH augmentation then applies inside the
 provider, for `autogent-nostr` and for the agent's own tools.
+
+The agent binary is found on that augmented PATH, with one further fallback:
+when `autogent-nostr` is on none of its entries, the provider runs the entry
+point of the package it was bundled from, as `node <pkg>/dist/cli.js`, and only
+while that file still exists on disk. Both routes exec Node directly, so the
+SIGTERM path of I5 is unaffected by which one is taken.
 
 ## What is not covered
 

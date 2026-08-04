@@ -8,7 +8,7 @@
  * `last_error`.
  *
  * We scrub anyway, for the case the desktop cannot cover: this provider is also
- * run by hand (`npm run backend:deploy`) and by tests, where nothing is between
+ * run by hand (`npm run backend`) and by tests, where nothing is between
  * its stdout and a terminal scrollback. A provider that only behaves when
  * somebody else is watching is not the property we want.
  */
