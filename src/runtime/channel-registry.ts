@@ -58,6 +58,15 @@ export class ChannelRegistry {
     return [...this.#actors.keys()];
   }
 
+  /** Channels currently holding a running turn (inactivity monitor input). */
+  get turnsInFlight(): number {
+    let count = 0;
+    for (const actor of this.#actors.values()) {
+      if (actor.activeTurn !== null) count += 1;
+    }
+    return count;
+  }
+
   has(channelId: string): boolean {
     return this.#actors.has(channelId);
   }

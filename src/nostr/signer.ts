@@ -15,6 +15,7 @@ import {
 import { decode as nip19Decode } from "nostr-tools/nip19";
 import { hexToBytes } from "nostr-tools/utils";
 import { schnorr } from "@noble/curves/secp256k1.js";
+import { hmac } from "@noble/hashes/hmac.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import type { NostrEvent, UnsignedNostrEvent } from "./types.js";
 
@@ -28,6 +29,13 @@ export interface Signer {
   decrypt(senderPubkey: string, ciphertext: string): string;
   /** BIP-340 signature over an arbitrary 32-byte digest (used by NIP-OA tooling). */
   signDigest(digest: Uint8Array): string;
+  /**
+   * HMAC-SHA256 keyed by the NIP-44 conversation key with `counterpartyPubkey`.
+   *
+   * Exists for NIP-AE d-tag derivation. The conversation key itself never
+   * leaves the signer: callers get the MAC, not the key.
+   */
+  conversationHmac(counterpartyPubkey: string, message: Uint8Array): Uint8Array;
 }
 
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -89,6 +97,10 @@ class LocalSigner implements Signer {
 
   signDigest(digest: Uint8Array): string {
     return Buffer.from(schnorr.sign(digest, this.#secret)).toString("hex");
+  }
+
+  conversationHmac(counterpartyPubkey: string, message: Uint8Array): Uint8Array {
+    return hmac(sha256, this.#conversationKey(counterpartyPubkey), message);
   }
 }
 

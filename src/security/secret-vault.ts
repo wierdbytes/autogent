@@ -90,6 +90,10 @@ export const DENIED_ENV_PREFIXES: readonly string[] = ["AUTOGENT_", "BUZZ_", "NO
 export const BOOTSTRAP_SECRET_ENV_VARS: readonly string[] = [
   "BUZZ_PRIVATE_KEY",
   "BUZZ_AUTH_TAG",
+  // The k8s bootstrap triple (remote plan §3.1). The auth tag is not secret
+  // but has no business lingering in the environment of a live process.
+  "AUTOGENT_NSEC",
+  "AUTOGENT_AUTH_TAG",
   "NOSTR_PRIVATE_KEY",
   "NOSTR_SECRET_KEY",
   "AUTOGENT_AGENT_SECRET",

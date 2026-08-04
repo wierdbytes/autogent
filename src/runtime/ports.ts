@@ -339,6 +339,17 @@ export interface PiUsage {
 export interface SessionRegistryPort {
   /** Opens or creates the persistent Pi session for a channel. */
   acquire(channelId: string): Promise<AgentSessionHandle>;
+  /**
+   * Applies a config change to future sessions (core-engram hot update).
+   * Optional: test fakes and registries without live reconfig may omit it.
+   */
+  applyConfig?(update: {
+    model?: string;
+    thinkingLevel?: string;
+    appendSystemPrompt?: string;
+    tools?: string[];
+    excludeTools?: string[];
+  }): Promise<void>;
   /** Drops the in-memory session; the transcript on disk survives. */
   release(channelId: string): Promise<void>;
   /** Starts a fresh session for the channel, discarding prior context. */

@@ -76,6 +76,29 @@ export interface OutputConfig {
   oversizePolicy: OversizeOutputPolicy;
 }
 
+export interface LifecycleConfig {
+  /**
+   * Self-terminate after this many seconds with no dispatched events and no
+   * turns in flight (remote plan §6.2.5). 0 — the legal "run indefinitely".
+   */
+  inactivityExitSec: number;
+  /**
+   * Hard ceiling for the whole post-signal shutdown path, in seconds. Must fit
+   * inside the substrate's grace budget (k8s: terminationGracePeriodSeconds).
+   */
+  shutdownBudgetSec: number;
+}
+
+export interface RemoteConfig {
+  /**
+   * When true the agent is engram-configured (remote plan §3.3): the `core`
+   * head overrides env, `mem/provider-auth` is materialised into a pi
+   * `auth.json`, and a missing head is fail-closed degraded rather than "start
+   * empty". Set by the k8s provider; off for local development.
+   */
+  engramConfig: boolean;
+}
+
 export interface AgentConfig {
   relayUrl: string;
   /** Stable local identifier for the relay, used in conversation keys. */
@@ -92,6 +115,8 @@ export interface AgentConfig {
   scheduler: SchedulerConfig;
   telemetry: TelemetryConfig;
   output: OutputConfig;
+  lifecycle: LifecycleConfig;
+  remote: RemoteConfig;
   logLevel: "error" | "warn" | "info" | "debug";
 }
 
@@ -129,6 +154,8 @@ export function defaultConfig(): AgentConfig {
     },
     telemetry: { enabled: true, coalesceMs: 40, metricsEnabled: true },
     output: { maxMessageBytes: 16_000, oversizePolicy: "split" },
+    lifecycle: { inactivityExitSec: 0, shutdownBudgetSec: 60 },
+    remote: { engramConfig: false },
     logLevel: "info",
   };
 }
@@ -216,6 +243,12 @@ export function applyEnv(base: AgentConfig, env = process.env): AgentConfig {
   next.profile.name = envString("AUTOGENT_PROFILE_NAME") ?? next.profile.name;
   next.profile.about = envString("AUTOGENT_PROFILE_ABOUT") ?? next.profile.about;
 
+  next.lifecycle.inactivityExitSec =
+    envNumber("AUTOGENT_INACTIVITY_EXIT") ?? next.lifecycle.inactivityExitSec;
+  next.lifecycle.shutdownBudgetSec =
+    envNumber("AUTOGENT_SHUTDOWN_BUDGET") ?? next.lifecycle.shutdownBudgetSec;
+  next.remote.engramConfig = envBool("AUTOGENT_ENGRAM_CONFIG") ?? next.remote.engramConfig;
+
   next.output.maxMessageBytes =
     envNumber("AUTOGENT_MAX_MESSAGE_BYTES") ?? next.output.maxMessageBytes;
   const oversize = envString("AUTOGENT_OVERSIZE_POLICY");
@@ -249,6 +282,12 @@ export function validateConfig(config: AgentConfig): string[] {
   }
   if (config.security.respondTo === "allowlist" && config.security.allowlist.length === 0) {
     problems.push("security.respondTo is 'allowlist' but the allowlist is empty");
+  }
+  if (config.lifecycle.inactivityExitSec < 0) {
+    problems.push("lifecycle.inactivityExitSec must be zero or positive");
+  }
+  if (config.lifecycle.shutdownBudgetSec < 10) {
+    problems.push("lifecycle.shutdownBudgetSec must be at least 10 seconds");
   }
   return problems;
 }

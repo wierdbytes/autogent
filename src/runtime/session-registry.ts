@@ -44,6 +44,8 @@ interface SdkModule {
     open(path: string, sessionDir?: string): unknown;
   };
   ModelRuntime: { create(): Promise<{ getModel(provider: string, id: string): unknown }> };
+  /** Present in the real SDK; optional so test fakes stay minimal. */
+  DefaultResourceLoader?: new (options: Record<string, unknown>) => { reload(): Promise<void> };
 }
 
 /**
@@ -123,8 +125,28 @@ export class SessionRegistry implements SessionRegistryPort {
   readonly #sessions = new Map<string, AgentSessionHandle>();
   #sdk: SdkModule | null = null;
   #modelRuntime: { getModel(provider: string, id: string): unknown } | null = null;
+  #config: PiConfig;
 
-  constructor(private readonly deps: SessionRegistryDeps) {}
+  constructor(private readonly deps: SessionRegistryDeps) {
+    this.#config = { ...deps.config };
+  }
+
+  /**
+   * Applies a core-engram config change (remote plan §3.3).
+   *
+   * New sessions pick the new parameters up immediately; live channel sessions
+   * are recreated lazily — dropped from memory here, reopened from their
+   * on-disk transcript on the channel's next turn — so a config push never
+   * aborts a running turn.
+   */
+  async applyConfig(update: Partial<PiConfig>): Promise<void> {
+    this.#config = { ...this.#config, ...update };
+    for (const [channelId, session] of [...this.#sessions.entries()]) {
+      if (session.isStreaming) continue; // picked up on rotation/next acquire after release
+      this.#sessions.delete(channelId);
+      session.dispose();
+    }
+  }
 
   async acquire(channelId: string): Promise<AgentSessionHandle> {
     const existing = this.#sessions.get(channelId);
@@ -168,25 +190,37 @@ export class SessionRegistry implements SessionRegistryPort {
    */
   async #open(channelId: string, options: { fresh: boolean }): Promise<AgentSessionHandle> {
     const sdk = await this.#sdkModule();
+    const config = this.#config;
     const record = this.deps.channels.get(this.deps.relayId, channelId);
     const priorPath = options.fresh ? null : record?.piSessionPath;
 
     const sessionManager = priorPath
       ? sdk.SessionManager.open(priorPath)
-      : sdk.SessionManager.create(this.deps.config.cwd);
+      : sdk.SessionManager.create(config.cwd);
 
-    const model = this.deps.config.model
-      ? await this.#resolveModel(this.deps.config.model)
-      : undefined;
+    const model = config.model ? await this.#resolveModel(config.model) : undefined;
+
+    // The owner's extra system prompt travels through a resource loader; the
+    // SDK has no direct `appendSystemPrompt` option on createAgentSession.
+    let resourceLoader: { reload(): Promise<void> } | undefined;
+    if (config.appendSystemPrompt && sdk.DefaultResourceLoader) {
+      resourceLoader = new sdk.DefaultResourceLoader({
+        cwd: config.cwd,
+        agentDir: config.agentDir,
+        appendSystemPrompt: [config.appendSystemPrompt],
+      });
+      await resourceLoader.reload();
+    }
 
     const { session } = await sdk.createAgentSession({
-      cwd: this.deps.config.cwd,
-      agentDir: this.deps.config.agentDir,
+      cwd: config.cwd,
+      agentDir: config.agentDir,
       sessionManager,
       ...(model ? { model } : {}),
-      ...(this.deps.config.thinkingLevel ? { thinkingLevel: this.deps.config.thinkingLevel } : {}),
-      ...(this.deps.config.tools ? { tools: this.deps.config.tools } : {}),
-      ...(this.deps.config.excludeTools ? { excludeTools: this.deps.config.excludeTools } : {}),
+      ...(config.thinkingLevel ? { thinkingLevel: config.thinkingLevel } : {}),
+      ...(config.tools ? { tools: config.tools } : {}),
+      ...(config.excludeTools ? { excludeTools: config.excludeTools } : {}),
+      ...(resourceLoader ? { resourceLoader } : {}),
     });
 
     this.deps.channels.setPiSession(

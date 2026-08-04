@@ -89,8 +89,8 @@ export const SIBLING_CACHE_CAP = 256;
 export class AuthorGate {
   readonly #agentPubkey: string;
   readonly #ownerPubkey: string | null;
-  readonly #respondTo: RespondToMode;
-  readonly #allowlist: ReadonlySet<string>;
+  #respondTo: RespondToMode;
+  #allowlist: ReadonlySet<string>;
   readonly #configuredSiblings: ReadonlySet<string>;
   readonly #lookupProfile: ProfileLookup;
   readonly #logger: Logger | undefined;
@@ -107,6 +107,17 @@ export class AuthorGate {
     this.#lookupProfile = options.lookupProfile;
     this.#logger = options.logger;
     this.#cacheCap = options.cacheCap ?? SIBLING_CACHE_CAP;
+  }
+
+  /**
+   * Applies a core-engram policy change immediately (remote plan §3.3).
+   *
+   * Only the respond-to surface is hot-swappable: identity and owner are
+   * immutable for the life of the process, and siblings stay operator-vouched.
+   */
+  updatePolicy(policy: { respondTo: RespondToMode; allowlist: readonly string[] }): void {
+    this.#respondTo = policy.respondTo;
+    this.#allowlist = new Set(policy.allowlist);
   }
 
   async evaluate(input: AuthorGateInput): Promise<AuthorDecision> {

@@ -88,6 +88,19 @@ export const KIND = {
   MEMBERSHIP_REMOVED: 44101,
   /** NIP-AM usage metrics (durable, NIP-44 encrypted agent->owner). */
   USAGE_METRIC: 44200,
+  /**
+   * NIP-AE agent memory engram (parameterised replaceable, p-gated).
+   *
+   * Used by the remote-nodes plan for the `core` config engram and the
+   * `mem/provider-auth` credentials engram (docs/plans/20260804-remote-nodes.md §3).
+   */
+  ENGRAM: 30174,
+  /** NIP-34 git repository announcement (read-only for the agent). */
+  GIT_REPO_ANNOUNCEMENT: 30617,
+  /** NIP-34 git repository state (read-only for the agent). */
+  GIT_REPO_STATE: 30618,
+  /** NIP-98 HTTP auth event (signed per request, never stored by the relay). */
+  HTTP_AUTH: 27235,
 } as const;
 
 export type KindName = keyof typeof KIND;
@@ -108,6 +121,11 @@ export const AGENT_PUBLISHED_KINDS: readonly number[] = [
   KIND.PRESENCE,
   KIND.OBSERVER,
   KIND.USAGE_METRIC,
+  // Remote agents publish engram write-backs (OAuth refresh) and NIP-98 auth
+  // events for git/media; an attestation that misses these strands the agent
+  // mid-refresh instead of at boot.
+  KIND.ENGRAM,
+  KIND.HTTP_AUTH,
 ];
 
 /**

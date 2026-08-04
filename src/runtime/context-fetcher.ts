@@ -29,10 +29,19 @@ const DEFAULT_LOOKBACK_SEC = 24 * 60 * 60;
 const DEFAULT_TIMEOUT_MS = 3_000;
 
 export class ContextFetcher {
-  constructor(private readonly deps: ContextFetcherDeps) {}
+  #limit: number;
+
+  constructor(private readonly deps: ContextFetcherDeps) {
+    this.#limit = deps.limit;
+  }
+
+  /** Core-engram hot update (remote plan §3.3). Takes effect on the next fetch. */
+  setLimit(limit: number): void {
+    this.#limit = limit;
+  }
 
   async fetch(trigger: NostrEvent, threadRootId: string): Promise<ConversationContext | null> {
-    if (this.deps.limit <= 0) return null;
+    if (this.#limit <= 0) return null;
 
     const since = trigger.created_at - (this.deps.lookbackSec ?? DEFAULT_LOOKBACK_SEC);
     const channelId = trigger.tags.find((tag) => tag[0] === "h")?.[1];
@@ -48,7 +57,7 @@ export class ContextFetcher {
             since,
             // Over-fetch: the thread filter below discards most of it, and a
             // second round trip costs more than a slightly larger response.
-            limit: Math.max(this.deps.limit * 4, 40),
+            limit: Math.max(this.#limit * 4, 40),
           },
         ],
         this.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -70,8 +79,8 @@ export class ContextFetcher {
 
     if (relevant.length === 0) return null;
 
-    const truncated = relevant.length > this.deps.limit;
-    const window = truncated ? relevant.slice(-this.deps.limit) : relevant;
+    const truncated = relevant.length > this.#limit;
+    const window = truncated ? relevant.slice(-this.#limit) : relevant;
 
     const messages: ContextMessage[] = window.map((event) => ({
       eventId: event.id,

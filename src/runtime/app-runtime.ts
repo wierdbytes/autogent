@@ -9,6 +9,22 @@
 
 import { randomUUID } from "node:crypto";
 import type { AgentConfig } from "../config.js";
+import type { EngramClient } from "../nostr/engram-client.js";
+import {
+  CORE_SLUG,
+  isCoreBody,
+  PROVIDER_AUTH_SLUG,
+  type EngramHead,
+  type MemoryBody,
+} from "../nostr/nip-ae.js";
+import {
+  digestOf,
+  materializeAuth,
+  readLocalAuth,
+  recordAuthSynced,
+  watchAuthFile,
+} from "./provider-auth.js";
+import { applyCoreConfig, parseCoreConfig } from "./remote-config.js";
 import { createEventBuilder, type AgentEventBuilder } from "../nostr/event-builder.js";
 import { MembershipManager, type ChannelInfo } from "../nostr/memberships.js";
 import { PresencePublisher } from "../nostr/presence.js";
@@ -30,6 +46,7 @@ import { UsageTracker } from "../telemetry/usage-tracker.js";
 import { parseControlFrame } from "../telemetry/observer-envelope.js";
 import { ChannelRegistry } from "./channel-registry.js";
 import { ContextFetcher } from "./context-fetcher.js";
+import { InactivityMonitor } from "./inactivity.js";
 import { systemClock } from "./clock.js";
 import { canonicalThreadRoot } from "./conversation-key.js";
 import { OutputRouter } from "./output-router.js";
@@ -62,6 +79,30 @@ const PRE_LIVE_PHASES: ReadonlySet<RuntimePhase> = new Set<RuntimePhase>([
   "subscribing",
 ]);
 
+/**
+ * Post-drain finalisation reserve (remote plan §6.2.6): presence offline, the
+ * roster farewell and the relay close must always get at least this much of
+ * the shutdown budget, and the drain may never eat into it.
+ */
+export const SHUTDOWN_FINALIZE_RESERVE_MS = 7_000;
+
+/**
+ * Remote (engram-configured) mode, prepared by `main.ts` (remote plan §3).
+ *
+ * The initial head fetch happens before the runtime is constructed — the
+ * effective config feeds the constructor — so this block carries the outcome:
+ * the client for live updates, which heads were missing (degraded until they
+ * appear), and the env-derived base config that engram overlays are applied to.
+ */
+export interface RemoteRuntimeOptions {
+  engrams: EngramClient;
+  /** Env-derived config before the core-engram overlay. */
+  baseConfig: AgentConfig;
+  missing: { core: boolean; providerAuth: boolean };
+  coreHeadCreatedAt: number;
+  authHeadCreatedAt: number;
+}
+
 export interface AppRuntimeOptions {
   config: AgentConfig;
   signer: Signer;
@@ -69,6 +110,8 @@ export interface AppRuntimeOptions {
   authTag: AuthTag;
   logger: Logger;
   clock?: Clock;
+  /** Present when the agent is engram-configured (remote plan §3.3). */
+  remote?: RemoteRuntimeOptions;
   /** Injected by tests; production builds a real relay supervisor. */
   relay?: RelayPort;
   /** Injected by tests; production opens the SQLite file under the state dir. */
@@ -79,7 +122,7 @@ export interface AppRuntimeOptions {
 
 export class AppRuntime {
   #phase: RuntimePhase = "boot";
-  readonly #config: AgentConfig;
+  #config: AgentConfig;
   readonly #logger: Logger;
   readonly #clock: Clock;
   readonly #signer: Signer;
@@ -98,6 +141,15 @@ export class AppRuntime {
   readonly #presence: PresencePublisher;
   readonly #gate: AuthorGate;
   readonly #context: ContextFetcher;
+  readonly #concurrency: Semaphore;
+  readonly #remote: RemoteRuntimeOptions | null;
+  /** Heads the agent still lacks; non-empty means degraded (prompts refused). */
+  readonly #missing = { core: false, providerAuth: false };
+  #coreHeadCreatedAt = 0;
+  #authHeadCreatedAt = 0;
+  #stopAuthWatcher: (() => void) | null = null;
+  readonly #inactivity: InactivityMonitor;
+  #stopReason: string | null = null;
   /** Serialises roster republication; the dirty flag collapses bursts. */
   #profileSync: Promise<void> = Promise.resolve();
   #profileDirty = false;
@@ -107,6 +159,13 @@ export class AppRuntime {
   constructor(options: AppRuntimeOptions) {
     this.#config = options.config;
     this.#logger = options.logger;
+    this.#remote = options.remote ?? null;
+    if (this.#remote) {
+      this.#missing.core = this.#remote.missing.core;
+      this.#missing.providerAuth = this.#remote.missing.providerAuth;
+      this.#coreHeadCreatedAt = this.#remote.coreHeadCreatedAt;
+      this.#authHeadCreatedAt = this.#remote.authHeadCreatedAt;
+    }
     this.#clock = options.clock ?? systemClock;
     this.#signer = options.signer;
     this.#ownerPubkey = options.ownerPubkey;
@@ -220,7 +279,7 @@ export class AppRuntime {
       newTurnId: () => randomUUID(),
       idleTimeoutMs: this.#config.scheduler.idleTimeoutSec * 1_000,
       maxTurnDurationMs: this.#config.scheduler.maxTurnDurationSec * 1_000,
-      concurrency: new Semaphore(this.#config.scheduler.maxConcurrentTurns),
+      concurrency: (this.#concurrency = new Semaphore(this.#config.scheduler.maxConcurrentTurns)),
     });
 
     this.#gate = new AuthorGate({
@@ -259,15 +318,32 @@ export class AppRuntime {
       heartbeatSec: this.#config.presence.heartbeatSec,
       logger: this.#logger.child({ component: "presence" }),
     });
+
+    this.#inactivity = new InactivityMonitor({
+      clock: this.#clock,
+      isBusy: () => this.#registry.turnsInFlight > 0,
+      onExpire: () => void this.stop("inactivity"),
+      logger: this.#logger.child({ component: "inactivity" }),
+    });
   }
 
   get phase(): RuntimePhase {
     return this.#phase;
   }
 
+  /** True while a required engram head is missing or revoked (plan §6.2.8). */
+  get degraded(): boolean {
+    return this.#missing.core || this.#missing.providerAuth;
+  }
+
   /** Resolves when the runtime has fully stopped. */
   get finished(): Promise<void> {
     return this.#stopped.promise;
+  }
+
+  /** Why the runtime stopped; null while it is still running. */
+  get stopReason(): string | null {
+    return this.#stopReason;
   }
 
   async start(): Promise<void> {
@@ -288,6 +364,7 @@ export class AppRuntime {
 
     this.#phase = "subscribing";
     await this.#memberships.start();
+    this.#startRemote();
 
     this.#phase = "recovering";
     // Discovery may have changed the set; publish it before going live.
@@ -295,24 +372,55 @@ export class AppRuntime {
     this.#recover();
     this.#outboxPublisher.start();
 
-    if (this.#config.presence.enabled) await this.#presence.online();
+    if (this.#config.presence.enabled) {
+      if (this.degraded) this.#presence.degraded();
+      else this.#presence.online();
+    }
+    this.#inactivity.arm(this.#config.lifecycle.inactivityExitSec);
     this.#phase = "running";
-    this.#logger.info("agent online", {
+    this.#logger.info(this.degraded ? "agent online (degraded)" : "agent online", {
       relayUrl: this.#config.relayUrl,
       channels: this.#registry.channelIds.length,
+      ...(this.degraded ? { missing: { ...this.#missing } } : {}),
     });
   }
 
+  /**
+   * Graceful shutdown with a bounded tail (remote plan §6.2.6).
+   *
+   * The whole post-signal path must fit the substrate's grace budget
+   * (`lifecycle.shutdownBudgetSec`, k8s: terminationGracePeriodSeconds 60).
+   * A finalisation reserve is carved out up front — presence offline, the
+   * roster farewell and the relay close are the parts an abandoned Pod cannot
+   * repair later — and the drain is what degrades when time runs out: turns
+   * are cancelled and the flush is abandoned, never the farewell.
+   */
   async stop(reason: string): Promise<void> {
     if (this.#phase === "draining" || this.#phase === "stopped") return;
     this.#phase = "draining";
+    this.#stopReason = reason;
     this.#logger.info("draining", { reason });
 
+    const budgetMs = this.#config.lifecycle.shutdownBudgetSec * 1000;
+    const reserveMs = Math.min(SHUTDOWN_FINALIZE_RESERVE_MS, Math.floor(budgetMs / 2));
+    const drainDeadline = this.#clock.now() + budgetMs - reserveMs;
+
+    this.#inactivity.stop();
+    this.#stopAuthWatcher?.();
+    this.#stopAuthWatcher = null;
     this.#memberships.stop();
-    await this.#registry.closeAll();
-    await this.#telemetry.flush();
+
+    const drained = await this.#withDeadline(this.#registry.closeAll(), drainDeadline, "drain");
+    if (!drained) {
+      // Out of drain budget: cancel everything and give the actors a moment to
+      // observe the abort before the finalisation tail runs.
+      this.#registry.cancelAll("shutdown");
+      await this.#withDeadline(this.#registry.closeAll(), this.#clock.now() + 2_000, "drain-abort");
+    }
+    await this.#withDeadline(this.#telemetry.flush(), drainDeadline, "telemetry-flush");
     this.#telemetry.close();
-    await this.#outboxPublisher.stop();
+    await this.#withDeadline(this.#outboxPublisher.stop(), drainDeadline, "outbox-stop");
+
     // The roster entry is the one thing that outlives this process on the relay,
     // so its last word must not be "online".
     await this.#announceOffline();
@@ -324,6 +432,25 @@ export class AppRuntime {
 
     this.#phase = "stopped";
     this.#stopped.resolve();
+  }
+
+  /** Races `work` against a wall-clock deadline. Returns false on timeout. */
+  async #withDeadline(work: Promise<unknown>, deadlineAt: number, label: string): Promise<boolean> {
+    const remaining = deadlineAt - this.#clock.now();
+    if (remaining <= 0) {
+      this.#logger.warn("shutdown step skipped: budget exhausted", { label });
+      return false;
+    }
+    const timeout = Symbol("timeout");
+    const timer = new Promise<typeof timeout>((resolve) => {
+      this.#clock.setTimeout(() => resolve(timeout), remaining);
+    });
+    const outcome = await Promise.race([work.then(() => true), timer]);
+    if (outcome === timeout) {
+      this.#logger.warn("shutdown step timed out", { label, budgetMs: remaining });
+      return false;
+    }
+    return true;
   }
 
   /* ------------------------------------------------------------------ */
@@ -388,8 +515,21 @@ export class AppRuntime {
       return;
     }
 
+    // Degraded is fail-closed for prompts but stays open for the owner's
+    // control commands (handled above): the agent must remain stoppable and
+    // diagnosable while it refuses to run "empty" (plan §3.2, §6.2.8).
+    if (this.degraded) {
+      this.#state.inbox.setDisposition(event.id, "rejected");
+      this.#logger.warn("prompt refused: agent is degraded", {
+        eventId: event.id,
+        missing: { ...this.#missing },
+      });
+      return;
+    }
+
     if (!this.#registry.has(channelId)) this.#onChannelAdded(channel);
     this.#state.channels.setLastSeen(this.#config.relayId, channelId, event.created_at);
+    this.#inactivity.noteActivity();
     this.#registry.submit(channelId, { event, promptTag: "@mention" });
   }
 
@@ -492,7 +632,127 @@ export class AppRuntime {
     }
   }
 
+  /* ------------------------------------------------------------------ */
+  /* Remote mode: engram subscription, hot config, auth write-back       */
+  /* ------------------------------------------------------------------ */
+
+  #startRemote(): void {
+    const remote = this.#remote;
+    if (!remote) return;
+
+    remote.engrams.subscribe([CORE_SLUG, PROVIDER_AUTH_SLUG], (slug, head) => {
+      if (slug === CORE_SLUG) void this.#onCoreEngram(head);
+      else void this.#onAuthEngram(head);
+    });
+
+    this.#stopAuthWatcher = watchAuthFile({
+      stateDir: this.#config.stateDir,
+      logger: this.#logger.child({ component: "auth-watcher" }),
+      onRefresh: (content) => void this.#writeBackAuth(content),
+    });
+  }
+
+  /** Applies a new core-engram head on the fly (plan §3.3). */
+  async #onCoreEngram(head: EngramHead): Promise<void> {
+    const remote = this.#remote;
+    if (!remote) return;
+    if (head.createdAt <= this.#coreHeadCreatedAt) return;
+    if (!isCoreBody(head.body)) return;
+
+    const parsed = parseCoreConfig(head.body.profile);
+    if (!parsed.config) {
+      // A malformed head keeps the previous config: stale beats broken.
+      this.#logger.warn("rejected core engram update", { problems: parsed.problems });
+      return;
+    }
+    this.#coreHeadCreatedAt = head.createdAt;
+
+    const next = applyCoreConfig(remote.baseConfig, parsed.config);
+    // respond_to / allowlist and scheduler ceilings bind immediately; model,
+    // thinking, prompt and tools bind per-session, lazily.
+    this.#gate.updatePolicy({
+      respondTo: next.security.respondTo,
+      allowlist: next.security.allowlist,
+    });
+    this.#concurrency.setPermits(next.scheduler.maxConcurrentTurns);
+    this.#context.setLimit(next.scheduler.contextMessageLimit);
+    await this.#sessions.applyConfig?.({
+      model: next.pi.model,
+      thinkingLevel: next.pi.thinkingLevel,
+      appendSystemPrompt: next.pi.appendSystemPrompt,
+      tools: next.pi.tools,
+      excludeTools: next.pi.excludeTools,
+    });
+    this.#config = { ...next, stateDir: this.#config.stateDir, relayUrl: this.#config.relayUrl };
+    this.#inactivity.arm(next.lifecycle.inactivityExitSec);
+
+    this.#logger.info("core engram applied", { createdAt: head.createdAt });
+    if (this.#missing.core) {
+      this.#missing.core = false;
+      this.#maybeLeaveDegraded();
+    }
+  }
+
+  /** Materialises a newer provider-auth head, or degrades on a tombstone. */
+  async #onAuthEngram(head: EngramHead): Promise<void> {
+    if (head.createdAt <= this.#authHeadCreatedAt) return;
+    const body = head.body as MemoryBody;
+    if (body.slug !== PROVIDER_AUTH_SLUG) return;
+    this.#authHeadCreatedAt = head.createdAt;
+
+    if (body.value === null) {
+      // Owner revoked the credentials. Fail closed now rather than at the
+      // next provider call: prompts stop, presence flips to degraded.
+      this.#logger.warn("provider-auth engram tombstoned; entering degraded mode");
+      this.#missing.providerAuth = true;
+      if (this.#config.presence.enabled) this.#presence.degraded();
+      return;
+    }
+
+    const local = await readLocalAuth(this.#config.stateDir);
+    if (local !== null && digestOf(local) === digestOf(body.value)) {
+      // Our own write-back echoing off the relay; just move the watermark.
+      await recordAuthSynced(this.#config.stateDir, body.value, head.createdAt);
+      return;
+    }
+    await materializeAuth(this.#config.stateDir, body.value, head.createdAt);
+    this.#logger.info("provider-auth engram materialised", { createdAt: head.createdAt });
+    if (this.#missing.providerAuth) {
+      this.#missing.providerAuth = false;
+      this.#maybeLeaveDegraded();
+    }
+  }
+
+  /** Publishes a pi OAuth refresh back to the relay (plan §3.2 write-back). */
+  async #writeBackAuth(content: string): Promise<void> {
+    const remote = this.#remote;
+    if (!remote) return;
+    try {
+      const head = await remote.engrams.publish(
+        PROVIDER_AUTH_SLUG,
+        { slug: PROVIDER_AUTH_SLUG, value: content },
+        { createdAt: this.#authHeadCreatedAt },
+      );
+      this.#authHeadCreatedAt = head.createdAt;
+      await recordAuthSynced(this.#config.stateDir, content, head.createdAt);
+      this.#logger.info("provider-auth write-back published", { createdAt: head.createdAt });
+    } catch (error) {
+      // The token still works locally; the next refresh (or restart) retries.
+      this.#logger.warn("provider-auth write-back failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  #maybeLeaveDegraded(): void {
+    if (this.degraded) return;
+    if (this.#phase !== "running") return;
+    this.#logger.info("leaving degraded mode: all required engram heads present");
+    if (this.#config.presence.enabled) this.#presence.online();
+  }
+
   async #onControlCommand(command: string, channelId: string): Promise<void> {
+    this.#inactivity.noteActivity();
     switch (command) {
       case "cancel":
         this.#registry.cancel(channelId, "owner_cancel");
@@ -560,6 +820,9 @@ export class AppRuntime {
   /* ------------------------------------------------------------------ */
 
   #onTurnSettled(turn: TurnContext, sessionId: string | null, stopReason: string): void {
+    // A settling turn refreshes the inactivity window: the ceiling measures
+    // silence after the last work, not since the last inbound event.
+    this.#inactivity.noteActivity();
     if (!this.#config.telemetry.metricsEnabled || !sessionId) return;
 
     const payload = this.#usageTracker.settle({

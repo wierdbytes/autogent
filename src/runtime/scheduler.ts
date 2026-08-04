@@ -11,11 +11,36 @@
 
 export class Semaphore {
   #available: number;
+  #permits: number;
   readonly #waiters: Array<() => void> = [];
 
   constructor(permits: number) {
     if (permits < 1) throw new Error("semaphore needs at least one permit");
     this.#available = permits;
+    this.#permits = permits;
+  }
+
+  get permits(): number {
+    return this.#permits;
+  }
+
+  /**
+   * Resizes the ceiling at runtime (core-engram hot update, remote plan §3.3).
+   *
+   * Growth wakes as many waiters as new permits exist. Shrinking never revokes
+   * a permit already held — running turns finish; the lower ceiling binds as
+   * they release (available may go negative in the interim, which simply means
+   * no waiter is served until the deficit clears).
+   */
+  setPermits(permits: number): void {
+    if (permits < 1) throw new Error("semaphore needs at least one permit");
+    const delta = permits - this.#permits;
+    this.#permits = permits;
+    this.#available += delta;
+    while (this.#available > 0 && this.#waiters.length > 0) {
+      this.#available -= 1;
+      this.#waiters.shift()?.();
+    }
   }
 
   get available(): number {
@@ -40,6 +65,12 @@ export class Semaphore {
     return () => {
       if (released) return;
       released = true;
+      // A shrink may have driven `available` negative; the released permit then
+      // pays down the deficit instead of waking a waiter.
+      if (this.#available < 0) {
+        this.#available += 1;
+        return;
+      }
       const next = this.#waiters.shift();
       if (next) {
         next();

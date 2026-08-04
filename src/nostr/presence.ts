@@ -11,7 +11,7 @@ import type { Clock, Logger, RelayPort } from "../runtime/ports.js";
 import type { AgentEventBuilder } from "./event-builder.js";
 import { KIND } from "./types.js";
 
-export type PresenceStatus = "online" | "offline";
+export type PresenceStatus = "online" | "offline" | "degraded";
 
 export const DEFAULT_HEARTBEAT_SEC = 60;
 
@@ -31,6 +31,8 @@ export class PresencePublisher {
   readonly #logger: Logger;
   #cancelHeartbeat: (() => void) | null = null;
   #status: PresenceStatus | null = null;
+  /** What the heartbeat repeats: "online", or "degraded" while fail-closed. */
+  #liveStatus: "online" | "degraded" = "online";
 
   constructor(options: PresencePublisherOptions) {
     this.#relay = options.relay;
@@ -46,9 +48,28 @@ export class PresencePublisher {
 
   /** Announces readiness and starts the heartbeat. Idempotent. */
   online(): void {
-    this.#publish("online");
+    this.#liveStatus = "online";
+    this.#beat();
+  }
+
+  /**
+   * Degraded: the agent is reachable for owner diagnostics but refuses
+   * prompts (missing engram heads / invalid credentials, remote plan §6.2.8).
+   * Presence-is-status is the only management channel, so the state must be
+   * visible on the relay rather than only in Pod logs.
+   */
+  degraded(): void {
+    this.#liveStatus = "degraded";
+    this.#beat();
+  }
+
+  #beat(): void {
+    this.#publish(this.#liveStatus);
     if (this.#cancelHeartbeat !== null) return;
-    this.#cancelHeartbeat = this.#clock.setInterval(() => this.#publish("online"), this.#heartbeatMs);
+    this.#cancelHeartbeat = this.#clock.setInterval(
+      () => this.#publish(this.#liveStatus),
+      this.#heartbeatMs,
+    );
   }
 
   /** Best-effort farewell on graceful shutdown. */
