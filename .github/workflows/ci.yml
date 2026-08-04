@@ -8,7 +8,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     tags: ["v*.*.*"]
   pull_request:
 
