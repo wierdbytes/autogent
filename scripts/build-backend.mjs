@@ -85,20 +85,27 @@ const banner = [
   `':' //; exec "$N" "$0" "$@"`,
 ].join("\n");
 
-await build({
-  entryPoints: [join(root, "src", "backend", "cli.ts")],
-  outfile: join(root, "dist", "backend", "buzz-backend-autogent.cjs"),
-  bundle: true,
-  platform: "node",
-  format: "cjs",
-  target: "node22",
-  sourcemap: false,
-  legalComments: "none",
-  banner: { js: banner },
-  define: {
-    __AUTOGENT_VERSION__: JSON.stringify(pkg.version),
-    __AUTOGENT_AGENT_FALLBACK__: JSON.stringify(agentFallback),
-  },
-});
+/** Both providers share the wire layer and the self-contained-bundle rule. */
+const providers = [
+  { entry: join(root, "src", "backend", "cli.ts"), out: "buzz-backend-autogent.cjs" },
+  { entry: join(root, "src", "backend-k8s", "cli.ts"), out: "buzz-backend-autogent-k8s.cjs" },
+];
 
-process.stdout.write("built dist/backend/buzz-backend-autogent.cjs\n");
+for (const provider of providers) {
+  await build({
+    entryPoints: [provider.entry],
+    outfile: join(root, "dist", "backend", provider.out),
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    target: "node22",
+    sourcemap: false,
+    legalComments: "none",
+    banner: { js: banner },
+    define: {
+      __AUTOGENT_VERSION__: JSON.stringify(pkg.version),
+      __AUTOGENT_AGENT_FALLBACK__: JSON.stringify(agentFallback),
+    },
+  });
+  process.stdout.write(`built dist/backend/${provider.out}\n`);
+}

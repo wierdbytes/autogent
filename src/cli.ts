@@ -27,6 +27,7 @@ import { ARGV_SECRET_WARNING, type OwnerSecretSource } from "./provisioning/owne
 import { createIdentityStore, ProvisioningError } from "./provisioning/identity-store.js";
 import { initIdentity, initInstructions } from "./provisioning/init.js";
 import { formatUpResult, up } from "./backend/up.js";
+import { commandAuthLogin, commandAuthRevoke, commandAuthStatus } from "./owner-auth/cli.js";
 import { ProfileReconciler } from "./nostr/profile.js";
 import { createEventBuilder } from "./nostr/event-builder.js";
 import { RelaySupervisor } from "./nostr/relay-supervisor.js";
@@ -45,6 +46,9 @@ Usage:
                                 [--owner-private-key <hex|nsec>]
   autogent-nostr channel remove --channel <uuid> [--pubkey <hex>]
                                 [--owner-private-key <hex|nsec>]
+  autogent-nostr auth login  --agent <pubkey> [--relay <url>] [--nsec-file <path>]
+  autogent-nostr auth status [--agent <pubkey>]
+  autogent-nostr auth revoke --agent <pubkey> [--relay <url>] [--nsec-file <path>]
   autogent-nostr profile sync
   autogent-nostr doctor
   autogent-nostr run
@@ -60,6 +64,9 @@ Commands:
   provision import  Verify and store an attestation (agent host).
   channel add       Add a member to a channel (OWNER host — signs with the owner key).
   channel remove    Remove a member from a channel (OWNER host).
+  auth              Bind an Anthropic OAuth account to a remote agent (OWNER host):
+                    the credential is stored per agent and published as the
+                    mem/provider-auth engram, which the remote Pod reads at boot.
   profile sync      Republish kind 0 / kind 10100 if they are missing or stale.
   doctor            Check identity, permissions, configuration and Pi availability.
   run               Start the agent in the foreground (this process becomes it).
@@ -368,6 +375,19 @@ export async function main(argv: string[]): Promise<number> {
         return 2;
       }
       return commandChannel(sub, flags);
+    }
+    case "auth": {
+      const sub = flags.positional[0];
+      const authFlags = {
+        agent: flags.values.get("agent") ?? flags.positional[1],
+        relay: flags.values.get("relay"),
+        nsecFile: flags.values.get("nsec-file"),
+      };
+      if (sub === "login") return commandAuthLogin(authFlags);
+      if (sub === "status") return commandAuthStatus(authFlags);
+      if (sub === "revoke") return commandAuthRevoke(authFlags);
+      process.stderr.write("unknown auth subcommand; expected `login`, `status` or `revoke`\n");
+      return 2;
     }
     case "profile":
       if (flags.positional[0] !== "sync") {

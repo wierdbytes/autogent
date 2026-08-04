@@ -1,0 +1,150 @@
+/**
+ * Engram publication during `deploy` (remote plan §4.3 step 3).
+ *
+ * The provider holds the nsec by design (that is its job in the provider
+ * protocol), so it can sign as the agent: the `core` engram is derived from
+ * the deploy payload's effective config, and `mem/provider-auth` ships the
+ * credential file that `autogent auth login` produced. Both are on the relay
+ * *before* any k8s object exists, so a Pod never starts into a world where
+ * its config could not have arrived yet.
+ */
+
+import type { DeployPayload } from "../backend/payload.js";
+import { EngramClient } from "../nostr/engram-client.js";
+import { createEventBuilder } from "../nostr/event-builder.js";
+import { CORE_SLUG, PROVIDER_AUTH_SLUG } from "../nostr/nip-ae.js";
+import { RelaySupervisor } from "../nostr/relay-supervisor.js";
+import { createSigner } from "../nostr/signer.js";
+import { fail } from "../backend/wire.js";
+import { systemClock } from "../runtime/clock.js";
+import { nullLogger } from "../runtime/logger.js";
+import type { CoreConfigV1 } from "../runtime/remote-config.js";
+
+/** Non-secret env the Pod receives directly instead of via the engram. */
+export const POD_ENV_PASSTHROUGH: readonly string[] = [
+  "AUTOGENT_RELAY_ID",
+  "AUTOGENT_TELEMETRY",
+  "AUTOGENT_METRICS",
+  "AUTOGENT_LOG_LEVEL",
+  "AUTOGENT_PROFILE_NAME",
+  "AUTOGENT_PROFILE_ABOUT",
+  "AUTOGENT_SUBSCRIBE",
+];
+
+function effectiveEnv(payload: DeployPayload): Record<string, string> {
+  // Tier order mirrors the local provider: policy defaults under user env.
+  if (payload.launch) return { ...payload.launch.policyEnv, ...payload.launch.env };
+  return { ...payload.envVars };
+}
+
+function numberOf(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function listOf(value: string | undefined): string[] | undefined {
+  if (value === undefined) return undefined;
+  const items = value
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item !== "");
+  return items.length > 0 ? items : undefined;
+}
+
+/**
+ * Derives the core-engram config from the payload (`launch.env` never reaches
+ * the Pod — this projection is how the desktop's effective config travels).
+ */
+export function buildCoreConfig(payload: DeployPayload, inactivitySeconds: number): CoreConfigV1 {
+  const env = effectiveEnv(payload);
+  const config: CoreConfigV1 = { v: 1 };
+
+  const model = env["AUTOGENT_MODEL"] ?? env["BUZZ_ACP_MODEL"] ?? payload.model ?? undefined;
+  if (model) config.model = model;
+  const thinking = env["AUTOGENT_THINKING"];
+  if (thinking) config.thinking = thinking;
+  const systemPrompt = payload.systemPrompt ?? env["AUTOGENT_SYSTEM_PROMPT"] ?? undefined;
+  if (systemPrompt) config.system_prompt = systemPrompt;
+
+  config.respond_to = payload.respondTo;
+  if (payload.respondToAllowlist.length > 0) {
+    config.respond_to_allowlist = payload.respondToAllowlist;
+  }
+
+  const include = listOf(env["AUTOGENT_TOOLS"]);
+  const exclude = listOf(env["AUTOGENT_EXCLUDE_TOOLS"]);
+  if (include || exclude) {
+    config.tools = { ...(include ? { include } : {}), ...(exclude ? { exclude } : {}) };
+  }
+
+  const maxConcurrent = numberOf(env["AUTOGENT_MAX_CONCURRENT_TURNS"] ?? env["BUZZ_ACP_AGENTS"]);
+  const contextLimit = numberOf(env["AUTOGENT_CONTEXT_MESSAGE_LIMIT"]);
+  if (maxConcurrent !== undefined || contextLimit !== undefined) {
+    config.scheduler = {
+      ...(maxConcurrent !== undefined && maxConcurrent >= 1
+        ? { max_concurrent_turns: Math.floor(maxConcurrent) }
+        : {}),
+      ...(contextLimit !== undefined ? { context_message_limit: Math.floor(contextLimit) } : {}),
+    };
+  }
+
+  config.inactivity_exit_sec = inactivitySeconds;
+  return config;
+}
+
+/** The Pod env derived from the payload's non-secret passthrough keys. */
+export function buildPodEnv(payload: DeployPayload): Record<string, string> {
+  const env = effectiveEnv(payload);
+  const out: Record<string, string> = {};
+  for (const name of POD_ENV_PASSTHROUGH) {
+    const value = env[name];
+    if (value !== undefined) out[name] = value;
+  }
+  if (payload.name && out["AUTOGENT_PROFILE_NAME"] === undefined) {
+    out["AUTOGENT_PROFILE_NAME"] = payload.name;
+  }
+  return out;
+}
+
+export interface PublishEngramsInput {
+  payload: DeployPayload;
+  inactivitySeconds: number;
+  /** Raw auth.json bytes from the owner-side store. */
+  providerAuthJson: string;
+}
+
+/**
+ * Signs and publishes both engrams over an authenticated relay connection.
+ * Throws (in-band `ok:false` upstream) when the relay refuses either head.
+ */
+export async function publishDeployEngrams(input: PublishEngramsInput): Promise<void> {
+  const { payload } = input;
+  const signer = createSigner(new Uint8Array(payload.secret));
+  const builder = createEventBuilder({ signer, authTag: payload.auth, clock: systemClock });
+  const relay = new RelaySupervisor({
+    url: payload.relayUrl,
+    builder,
+    clock: systemClock,
+    logger: nullLogger,
+  });
+
+  try {
+    await relay.connect();
+    const engrams = new EngramClient({ relay, signer, builder, clock: systemClock });
+
+    const core = buildCoreConfig(payload, input.inactivitySeconds);
+    await engrams.publish(CORE_SLUG, { slug: CORE_SLUG, profile: JSON.stringify(core) });
+    await engrams.publish(PROVIDER_AUTH_SLUG, {
+      slug: PROVIDER_AUTH_SLUG,
+      value: input.providerAuthJson,
+    });
+  } catch (error) {
+    fail(
+      `failed to publish deploy engrams to ${payload.relayUrl}: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
+  } finally {
+    await relay.close();
+  }
+}
