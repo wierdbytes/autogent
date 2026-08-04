@@ -1,0 +1,72 @@
+name: Publish
+
+# Continuous publishing on `master`, gated on a green build.
+#
+# Trigger model: every push to `master` builds the package, then publishes it
+# IFF the version in package.json is not already on npm. A push that bumps no
+# version is a no-op; bumping `version` and pushing publishes automatically.
+#
+# Auth: npm OIDC TRUSTED PUBLISHING — no NPM_TOKEN secret. The `id-token: write`
+# permission lets npm mint a short-lived OIDC credential that it matches against
+# the package's trusted-publisher config on npmjs.com. Provenance is automatic.
+#
+# One-time operator setup (NOT code):
+#   * on npmjs.com, add a trusted publisher for `@wierdbytes/autogent`:
+#       org `wierdbytes`, repo `autogent`, workflow file `publish.yml`.
+#   * requires a recent npm CLI (>= 11.5.1) — we upgrade below.
+
+on:
+  push:
+    branches: [master]
+
+concurrency:
+  group: publish-master
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # OIDC for npm trusted publishing
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # NO registry-url / token under OIDC — trusted publishing supplies the
+      # credential from `id-token: write`.
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      # Trusted publishing requires a recent npm CLI (>= 11.5.1).
+      - name: Upgrade npm (trusted publishing)
+        run: npm install -g npm@latest
+
+      - name: Install
+        run: npm ci
+
+      - name: Build (typecheck + emit)
+        run: npm run build
+
+      # Read name+version once for the version gate below.
+      - id: pkg
+        name: Read package manifest
+        run: |
+          echo "manifest=$(node -p "JSON.stringify({name:require('./package.json').name,version:require('./package.json').version})")" >> "$GITHUB_OUTPUT"
+
+      # Version gate: skip if this exact version is already on npm. `npm view`
+      # exits non-zero (E404) when the version is absent, which is our signal to
+      # publish; a hit means a prior push already shipped it.
+      - name: Publish (version-gated, OIDC)
+        env:
+          NAME: ${{ fromJSON(steps.pkg.outputs.manifest).name }}
+          VERSION: ${{ fromJSON(steps.pkg.outputs.manifest).version }}
+        run: |
+          echo "Package: ${NAME}@${VERSION}"
+          if npm view "${NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "Version ${VERSION} already published — skipping."
+            exit 0
+          fi
+          npm publish

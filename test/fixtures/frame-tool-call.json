@@ -1,0 +1,19 @@
+{
+  "kind": "acp_read",
+  "payload": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "update": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "call_7f21",
+        "title": "bash",
+        "toolName": "bash",
+        "status": "executing",
+        "args": {
+          "command": "npx vitest run test/telemetry-observer.test.ts"
+        }
+      }
+    }
+  }
+}

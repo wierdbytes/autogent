@@ -1,0 +1,15 @@
+{
+  "kind": "acp_write",
+  "payload": {
+    "jsonrpc": "2.0",
+    "method": "_goose/unstable/session/steer",
+    "params": {
+      "prompt": [
+        {
+          "type": "text",
+          "text": "[Buzz event: reply]\nEvent ID: 68b9c231ac85c9597c7fc9170905fcda11d2ae9deddd403931a87a7f8f9237b6\nChannel: Engineering (#0f2f4d9e-7c31-4a0e-9b6a-2a1d5c8e4b70)\nKind: 9\nFrom: alice (npub: npub1v3jgtp5fw843dw2x0z2pcvqz52yga3s9u7r3hw6e3qzut3wmjxeqz3n8kc, hex: 636485868971eac5aca33c4a0e1800a8a11d980bcf0e3776b31002e2c5db91b2)\nTime: 2026-08-03T12:00:20+00:00\nContent: actually only the seq test, skip the rest\nTags: [[\"e\",\"b8e1f80bd70ae0784c7855a451731b745fddb67749d23f637be9082b75e9575b\",\"\",\"reply\"]]\nParsed: parent=b8e1f80bd70ae0784c7855a451731b745fddb67749d23f637be9082b75e9575b"
+        }
+      ]
+    }
+  }
+}

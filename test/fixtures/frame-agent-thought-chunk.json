@@ -1,0 +1,14 @@
+{
+  "kind": "acp_read",
+  "payload": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "update": {
+        "sessionUpdate": "agent_thought_chunk",
+        "messageId": "msg_01HZ8QF3",
+        "content": "The seq assertion is the only one that touches persisted state."
+      }
+    }
+  }
+}

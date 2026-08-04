@@ -1,0 +1,8 @@
+{
+  "kind": "turn_error",
+  "payload": {
+    "outcome": "failed",
+    "error": "provider returned 529 after 5 attempts",
+    "code": "overloaded_error"
+  }
+}

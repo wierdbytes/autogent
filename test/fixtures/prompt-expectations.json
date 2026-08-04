@@ -1,0 +1,24 @@
+{
+  "primary": {
+    "sections": [
+      {
+        "title": "Context",
+        "body": "Scope: channel\nChannel: Engineering (#0f2f4d9e-7c31-4a0e-9b6a-2a1d5c8e4b70)\nReply in the channel unless asked otherwise."
+      },
+      {
+        "title": "Buzz event: @mention",
+        "body": "Event ID: b8e1f80bd70ae0784c7855a451731b745fddb67749d23f637be9082b75e9575b\nChannel: Engineering (#0f2f4d9e-7c31-4a0e-9b6a-2a1d5c8e4b70)\nKind: 9\nFrom: alice (npub: npub1v3jgtp5fw843dw2x0z2pcvqz52yga3s9u7r3hw6e3qzut3wmjxeqz3n8kc, hex: 636485868971eac5aca33c4a0e1800a8a11d980bcf0e3776b31002e2c5db91b2)\nTime: 2026-08-03T11:59:55+00:00\nContent: Can you re-run the observer publisher tests and tell me what fails?\nTags: [[\"h\",\"0f2f4d9e-7c31-4a0e-9b6a-2a1d5c8e4b70\"],[\"p\",\"d4f0bc5a29de06b510f9aa428f1eedba926012b591fef7a518e776a7c9bd1824\"]]\nParsed: root=4813494d137e1631bba301d5acab6e7bb7aa74ce1185d456565ef51d737677b2, mentions=[bob]"
+      }
+    ],
+    "buzzEventTitle": "Buzz event: @mention",
+    "userText": "Can you re-run the observer publisher tests and tell me what fails?",
+    "authorPubkey": "636485868971eac5aca33c4a0e1800a8a11d980bcf0e3776b31002e2c5db91b2",
+    "eventId": "b8e1f80bd70ae0784c7855a451731b745fddb67749d23f637be9082b75e9575b"
+  },
+  "steer": {
+    "buzzEventTitle": "Buzz event: reply",
+    "userText": "actually only the seq test, skip the rest",
+    "authorPubkey": "636485868971eac5aca33c4a0e1800a8a11d980bcf0e3776b31002e2c5db91b2",
+    "eventId": "68b9c231ac85c9597c7fc9170905fcda11d2ae9deddd403931a87a7f8f9237b6"
+  }
+}

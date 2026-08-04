@@ -1,0 +1,15 @@
+{
+  "kind": "acp_read",
+  "payload": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "call_7f21",
+        "status": "completed",
+        "content": "Test Files  1 passed (1)\nTests  9 passed (9)"
+      }
+    }
+  }
+}

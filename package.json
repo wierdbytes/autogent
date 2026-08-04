@@ -1,0 +1,63 @@
+{
+  "name": "@wierdbytes/autogent",
+  "version": "0.1.0",
+  "description": "Standalone Nostr agent on the Pi SDK (autogent-nostr), with a Buzz Desktop backend provider that deploys it.",
+  "type": "module",
+  "bin": {
+    "autogent-nostr": "dist/cli.js",
+    "buzz-backend-autogent": "dist/backend/buzz-backend-autogent.cjs"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/build-backend.mjs",
+    "build:backend": "node scripts/build-backend.mjs",
+    "backend": "node scripts/backend-run.mjs",
+    "backend:install": "mkdir -p \"$HOME/.local/bin\" && ln -sf \"$PWD/dist/backend/buzz-backend-autogent.cjs\" \"$HOME/.local/bin/buzz-backend-autogent\" && echo \"linked $HOME/.local/bin/buzz-backend-autogent\"",
+    "dev-relay": "node scripts/dev-relay.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "keywords": [
+    "nostr",
+    "pi",
+    "buzz",
+    "agent",
+    "autogent"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wierdbytes/autogent.git"
+  },
+  "homepage": "https://github.com/wierdbytes/autogent#readme",
+  "bugs": {
+    "url": "https://github.com/wierdbytes/autogent/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.83.0",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
+    "better-sqlite3": "^13.0.2",
+    "nostr-tools": "^2.24.1",
+    "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.12",
+    "esbuild": "^0.28.1",
+    "typescript": "^5.5.0",
+    "vitest": "^4.1.10"
+  }
+}

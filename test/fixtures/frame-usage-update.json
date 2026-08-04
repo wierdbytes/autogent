@@ -1,0 +1,18 @@
+{
+  "kind": "acp_read",
+  "payload": {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "update": {
+        "sessionUpdate": "usage_update",
+        "used": 48213,
+        "size": 200000,
+        "cost": {
+          "amount": 0.0412,
+          "currency": "USD"
+        }
+      }
+    }
+  }
+}
