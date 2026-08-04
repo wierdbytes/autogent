@@ -6,6 +6,12 @@
 # forwarding and zombie reaping of model-spawned tools; it execs nothing else.
 
 FROM node:22-slim AS build
+# node-gyp toolchain: better-sqlite3 compiles from source when no prebuilt
+# binary matches (slim image ships none of these). Build stage only — the
+# runtime stage copies the compiled node_modules and stays toolchain-free.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
