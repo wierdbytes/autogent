@@ -1,0 +1,9 @@
+# Namespace for autogent agents (remote plan §5 R5).
+# The provider does not create it: making the namespace an explicit operator
+# action keeps "where agents may run" a human decision.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: autogent
+  labels:
+    app.kubernetes.io/managed-by: autogent-ops

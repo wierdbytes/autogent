@@ -1,0 +1,37 @@
+# Egress posture for agent Pods (remote plan §4.4, §8).
+#
+# Target: egress only to the relay, the Anthropic API and DNS; no ingress at
+# all (the agent only dials out).
+#
+# Vanilla NetworkPolicy is IP/port-based and cannot express FQDNs, so this
+# manifest enforces the port surface (DNS + TLS) and documents the tighter
+# option: with Cilium (or Calico enterprise) replace the last egress rule with
+# FQDN rules for the relay host, api.anthropic.com and console.anthropic.com.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: autogent-agent-egress
+  namespace: autogent
+spec:
+  podSelector:
+    matchLabels:
+      app: autogent-agent
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: [] # dial-out only; presence over the relay is the status channel
+  egress:
+    # DNS (cluster and upstream)
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # TLS to the relay and the model provider. Tighten to FQDNs with Cilium:
+    #   toFQDNs: [{matchName: relay.example}, {matchName: api.anthropic.com},
+    #             {matchName: console.anthropic.com}]
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80

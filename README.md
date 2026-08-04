@@ -8,11 +8,15 @@ community:
 |---|---|
 | **`autogent-nostr`** | Standalone headless service. Talks Nostr directly, embeds the Pi SDK in-process. |
 | `buzz-backend-autogent` | Buzz Desktop backend provider. Deploys `autogent-nostr` as a local process, from the Desktop UI. |
+| `buzz-backend-autogent-k8s` | Buzz Desktop backend provider. Deploys `autogent-nostr` as a Pod on a Kubernetes cluster (k3s / AKS), via the ambient kubeconfig. |
 
 ```
 autogent-nostr:   Buzz Relay ──WS(NIP-42)──→ autogent-nostr ──in-process──→ Pi SDK AgentSession
 
 autogent:         Buzz Desktop ──JSON/stdio──→ buzz-backend-autogent ──spawn──→ autogent-nostr
+
+remote:           Buzz Desktop ──JSON/stdio──→ buzz-backend-autogent-k8s ──kubectl──→ Pod: autogent-nostr
+                  config + OAuth creds travel as NIP-AE engrams (kind 30174) over the relay
 ```
 
 The ACP adapter that preceded this (`pi-acp` — an ACP server bridging `buzz-acp`
@@ -297,3 +301,46 @@ identity, its database, its workspace and `agent.log`.
 
 The full contract, the substrate mapping and the deviations from the Kubernetes
 binding are in [`docs/buzz-backend-autogent.md`](docs/buzz-backend-autogent.md).
+
+---
+
+# buzz-backend-autogent-k8s (remote nodes)
+
+Deploys the same agent to a Kubernetes substrate. Design:
+[`docs/plans/20260804-remote-nodes.md`](docs/plans/20260804-remote-nodes.md);
+operations: [`docs/runbook-remote.md`](docs/runbook-remote.md).
+
+The shape of it:
+
+- **Relay-first bootstrap.** The cluster holds exactly one secret — the
+  bootstrap triple (`AUTOGENT_NSEC`, `AUTOGENT_RELAY_URL`, `AUTOGENT_AUTH_TAG`).
+  Everything else — model, prompt, respond-to policy, the Anthropic OAuth
+  credential — lives on the relay as NIP-44-encrypted NIP-AE engrams
+  (kind `30174`, slugs `core` and `mem/provider-auth`) and is read by the agent
+  at boot and hot-applied on change. Missing heads ⇒ the agent starts
+  *degraded*: visible, stoppable, refusing prompts.
+- **No management channel to the node.** Status is presence on the relay,
+  stop is owner `!shutdown`, lifetime is bounded by the in-harness
+  `exit-after-inactivity` timer, restart-on-crash is `restartPolicy`.
+- **Credentials** come from `autogent-nostr auth login --agent <pubkey>` on the
+  owner machine (pi's OAuth flow; one account = one agent), published as the
+  provider-auth engram. The agent writes refreshed tokens back, so a Pod
+  recreated with an empty PVC recovers them from the relay.
+- **Relay tools** in the Pod: `channel_history`/`channel_search` (NIP-50),
+  `media_get`/`media_put` (Blossom), `git_repos` + a loopback NIP-98 auth proxy
+  that lets the stock `git` CLI clone/push the relay's repos without the key
+  ever entering the bash environment, and `send_message` (cross-posting through
+  the durable outbox).
+
+Setup, in order:
+
+```bash
+# once, on the VM:                deploy/k3s-bootstrap.sh
+# once, on the owner machine:     merge kubeconfig, rename context (script prints how)
+npm run backend:install           # links both providers into ~/.local/bin
+autogent-nostr auth login --agent <pubkey> --relay wss://…
+# then in Buzz Desktop: provider "autogent-k8s", set the digest-pinned image, Deploy
+```
+
+Manifests for the namespace and the egress NetworkPolicy are in
+[`deploy/k8s/`](deploy/k8s/).
