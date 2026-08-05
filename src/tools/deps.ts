@@ -11,14 +11,21 @@ import type { AgentEventBuilder } from "../nostr/event-builder.js";
 import type { Signer } from "../nostr/signer.js";
 import type { Clock, Logger, RelayPort } from "../runtime/ports.js";
 
+/** One channel the agent is a member of, as exposed to the relay tools. */
+export interface ChannelInfo {
+  channelId: string;
+  name: string | null;
+  channelType: "stream" | "private" | "dm";
+}
+
 export interface RelayToolDeps {
   relay: RelayPort;
   signer: Signer;
   builder: AgentEventBuilder;
   clock: Clock;
   logger: Logger;
-  /** Channels the agent is currently a member of (early refusal gate). */
-  knownChannels(): ReadonlySet<string>;
+  /** Channels the agent is currently a member of (early refusal gate + name resolution). */
+  channelDirectory(): readonly ChannelInfo[];
   /** The model's working directory; media and clones stay inside it. */
   workspaceDir: string;
   /** `https://…` origin of the relay's HTTP side (git, media). */
@@ -72,6 +79,46 @@ export class ToolRefusal extends Error {
     super(message);
     this.name = "ToolRefusal";
   }
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function describeChannel(channel: ChannelInfo): string {
+  return channel.name ? `${channel.name} (${channel.channelId})` : channel.channelId;
+}
+
+/**
+ * Resolves a `channel` tool parameter — a uuid or a channel name — against the
+ * agent's own memberships. Doubles as the early refusal gate: only channels the
+ * agent is a member of resolve, so the model cannot probe for the existence of
+ * foreign channels through error-message differences. The refusal always lists
+ * the agent's memberships, which are the agent's own data and safe to show.
+ */
+export function resolveChannel(deps: RelayToolDeps, input: unknown): ChannelInfo {
+  const raw = String(input ?? "").trim();
+  if (raw === "") throw new ToolRefusal("channel must not be empty");
+  const directory = deps.channelDirectory();
+
+  if (UUID_RE.test(raw)) {
+    const byId = directory.find((channel) => channel.channelId === raw.toLowerCase());
+    if (byId) return byId;
+  } else {
+    const needle = raw.toLowerCase();
+    const byName = directory.filter((channel) => channel.name?.toLowerCase() === needle);
+    if (byName.length === 1) return byName[0] as ChannelInfo;
+    if (byName.length > 1) {
+      throw new ToolRefusal(
+        `channel name "${raw}" is ambiguous; pass the channel id: ` +
+          byName.map(describeChannel).join(", "),
+      );
+    }
+  }
+
+  const known =
+    directory.length === 0
+      ? "no channel memberships"
+      : `known channels: ${directory.map(describeChannel).join(", ")}`;
+  throw new ToolRefusal(`not a member of channel ${raw}; ${known}`);
 }
 
 /** Uniform failure envelope: refusals and errors surface as tool text. */

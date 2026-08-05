@@ -7,7 +7,7 @@
  * owner can switch a tool off with a config push, hot.
  */
 
-import { channelHistoryTool, channelSearchTool } from "./channel-tools.js";
+import { channelHistoryTool, channelListTool, channelSearchTool } from "./channel-tools.js";
 import type { RelayTool, RelayToolDeps } from "./deps.js";
 import { GitAuthProxy, gitReposTool } from "./git-tools.js";
 import { mediaGetTool, mediaPutTool } from "./media-tools.js";
@@ -18,6 +18,7 @@ export type { RelayTool, RelayToolDeps } from "./deps.js";
 export { GitAuthProxy } from "./git-tools.js";
 
 export const RELAY_TOOL_NAMES = [
+  "channel_list",
   "channel_history",
   "channel_search",
   "media_get",
@@ -43,6 +44,7 @@ export function buildRelayTools(deps: RelayToolDeps): RelayToolSet {
   return {
     gitProxy,
     tools: [
+      channelListTool(deps),
       channelHistoryTool(deps),
       channelSearchTool(deps),
       mediaGetTool(deps),

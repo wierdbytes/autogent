@@ -248,12 +248,12 @@ export class AppRuntime {
       builder: this.#builder,
       clock: this.#clock,
       logger: this.#logger.child({ component: "tools" }),
-      knownChannels: () =>
-        new Set(
-          this.#state.channels
-            .active(this.#config.relayId)
-            .map((channel) => channel.channelId),
-        ),
+      channelDirectory: () =>
+        this.#state.channels.active(this.#config.relayId).map((channel) => ({
+          channelId: channel.channelId,
+          name: channel.name,
+          channelType: channel.channelType,
+        })),
       workspaceDir: this.#config.pi.cwd,
       httpOrigin: httpOriginOf(this.#config.relayUrl),
       maxMediaBytes: 32 * 1024 * 1024,

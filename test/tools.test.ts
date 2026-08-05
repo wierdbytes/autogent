@@ -17,7 +17,7 @@ import { createSigner, verifyNostrEvent, type Signer } from "../src/nostr/signer
 import { KIND, tagValue, type NostrEvent } from "../src/nostr/types.js";
 import { systemClock } from "../src/runtime/clock.js";
 import { nullLogger } from "../src/runtime/logger.js";
-import { channelHistoryTool, channelSearchTool } from "../src/tools/channel-tools.js";
+import { channelHistoryTool, channelListTool, channelSearchTool } from "../src/tools/channel-tools.js";
 import { httpOriginOf, type RelayToolDeps } from "../src/tools/deps.js";
 import { GitAuthProxy, gitReposTool } from "../src/tools/git-tools.js";
 import { blossomHeader, nip98Header } from "../src/tools/http-auth.js";
@@ -26,6 +26,8 @@ import { sendMessageTool } from "../src/tools/send-message-tool.js";
 import { FakeRelayPort } from "./helpers/fake-relay-port.js";
 
 const CHANNEL = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const CHANNEL_2 = "11111111-2222-3333-4444-555555555555";
+const CHANNEL_3 = "99999999-8888-7777-6666-555555555555";
 
 interface ToolHarness {
   deps: RelayToolDeps;
@@ -52,7 +54,11 @@ function harness(overrides: Partial<RelayToolDeps> = {}): ToolHarness {
     builder,
     clock: systemClock,
     logger: nullLogger,
-    knownChannels: () => new Set([CHANNEL]),
+    channelDirectory: () => [
+      { channelId: CHANNEL, name: "LinkedIn", channelType: "stream" },
+      { channelId: CHANNEL_2, name: "ops", channelType: "private" },
+      { channelId: CHANNEL_3, name: "ops", channelType: "private" },
+    ],
     workspaceDir: workspace,
     httpOrigin: "http://relay.local",
     maxMediaBytes: 1024 * 1024,
@@ -90,9 +96,45 @@ describe("channel tools", () => {
 
   it("refuses channels outside the membership set without leaking existence", async () => {
     const result = await channelHistoryTool(h.deps).execute("t1", { channel: "other-channel" });
-    expect(result.content[0]?.text).toMatch(/not a member/);
+    const text = result.content[0]?.text ?? "";
+    expect(text).toMatch(/not a member/);
+    // The refusal teaches the model its own memberships — nothing foreign.
+    expect(text).toMatch(/known channels: LinkedIn/);
     // No relay query was attempted at all.
     expect(h.relay.subscriptions.size).toBe(0);
+  });
+
+  it("resolves a unique channel name case-insensitively", async () => {
+    let seenFilter: Record<string, unknown> | undefined;
+    h.relay.queryResponders.push((filters) => {
+      seenFilter = filters[0] as Record<string, unknown>;
+      return [];
+    });
+    await channelHistoryTool(h.deps).execute("t1", { channel: "linkedin" });
+    expect(seenFilter).toMatchObject({ "#h": [CHANNEL] });
+  });
+
+  it("refuses an ambiguous channel name and lists the candidates", async () => {
+    const result = await channelHistoryTool(h.deps).execute("t1", { channel: "ops" });
+    const text = result.content[0]?.text ?? "";
+    expect(text).toMatch(/ambiguous/);
+    expect(text).toContain(CHANNEL_2);
+    expect(text).toContain(CHANNEL_3);
+    expect(h.relay.subscriptions.size).toBe(0);
+  });
+
+  it("lists memberships with name, id and type", async () => {
+    const result = await channelListTool(h.deps).execute("t1", {});
+    const text = result.content[0]?.text ?? "";
+    expect(text).toContain(`LinkedIn — ${CHANNEL} [stream]`);
+    expect(text).toContain(`ops — ${CHANNEL_2} [private]`);
+  });
+
+  it("reports an empty membership set", async () => {
+    const empty = harness({ channelDirectory: () => [] });
+    const result = await channelListTool(empty.deps).execute("t1", {});
+    expect(result.content[0]?.text).toBe("no channel memberships");
+    rmSync(empty.workspace, { recursive: true, force: true });
   });
 
   it("reads history oldest-first through a bounded REQ", async () => {
@@ -136,7 +178,7 @@ describe("send_message", () => {
 
   it("queues into membership channels through the outbox path", async () => {
     const result = await sendMessageTool(h.deps).execute("t1", {
-      channel: CHANNEL,
+      channel: "LinkedIn",
       content: "cross-post",
     });
     expect(result.content[0]?.text).toMatch(/queued/);

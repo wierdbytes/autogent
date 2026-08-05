@@ -8,7 +8,14 @@
  * through the same durable outbox (write → sign → publish → confirm).
  */
 
-import { asToolError, textResult, ToolRefusal, type RelayTool, type RelayToolDeps } from "./deps.js";
+import {
+  asToolError,
+  resolveChannel,
+  textResult,
+  ToolRefusal,
+  type RelayTool,
+  type RelayToolDeps,
+} from "./deps.js";
 
 const MAX_BODY_BYTES = 16_000;
 
@@ -23,7 +30,7 @@ export function sendMessageTool(deps: RelayToolDeps): RelayTool {
     parameters: {
       type: "object",
       properties: {
-        channel: { type: "string", description: "Target channel id (uuid)" },
+        channel: { type: "string", description: "Target channel id (uuid) or channel name" },
         content: { type: "string", description: "Message body" },
         reply_to: {
           type: "string",
@@ -34,15 +41,12 @@ export function sendMessageTool(deps: RelayToolDeps): RelayTool {
     },
     async execute(_id, params) {
       try {
-        const channel = String(params["channel"] ?? "");
         const content = String(params["content"] ?? "");
         if (content.trim() === "") throw new ToolRefusal("content must not be empty");
         if (Buffer.byteLength(content, "utf8") > MAX_BODY_BYTES) {
           throw new ToolRefusal(`content exceeds ${MAX_BODY_BYTES} bytes`);
         }
-        if (!deps.knownChannels().has(channel)) {
-          throw new ToolRefusal(`not a member of channel ${channel}`);
-        }
+        const channel = resolveChannel(deps, params["channel"]).channelId;
         const replyTo = params["reply_to"] === undefined ? null : String(params["reply_to"]);
         const { eventId } = await deps.sendChat(
           channel,

@@ -1,5 +1,5 @@
 /**
- * `channel_history` / `channel_search` (remote plan §5.1).
+ * `channel_list` / `channel_history` / `channel_search` (remote plan §5.1).
  *
  * Straight one-shot REQs against the relay: NIP-50 `search` for relevance
  * queries, plain `#h` + since/until/limit for tail reads. Access control is
@@ -9,15 +9,16 @@
  */
 
 import { KIND, tagValue, type NostrEvent } from "../nostr/types.js";
-import { textResult, ToolRefusal, asToolError, type RelayTool, type RelayToolDeps } from "./deps.js";
+import {
+  textResult,
+  ToolRefusal,
+  asToolError,
+  resolveChannel,
+  type RelayTool,
+  type RelayToolDeps,
+} from "./deps.js";
 
 const RESULT_CAP = 50;
-
-function requireMembership(deps: RelayToolDeps, channelId: string): void {
-  if (!deps.knownChannels().has(channelId)) {
-    throw new ToolRefusal(`not a member of channel ${channelId}`);
-  }
-}
 
 function formatMessages(events: NostrEvent[]): string {
   if (events.length === 0) return "no messages found";
@@ -33,6 +34,30 @@ function formatMessages(events: NostrEvent[]): string {
   return lines.join("\n---\n");
 }
 
+export function channelListTool(deps: RelayToolDeps): RelayTool {
+  return {
+    name: "channel_list",
+    label: "List channels",
+    description:
+      "List the channels the agent is a member of: name, channel id and type. " +
+      "Use the id (or a unique name) with channel_history, channel_search and send_message.",
+    parameters: { type: "object", properties: {} },
+    async execute() {
+      try {
+        const directory = deps.channelDirectory();
+        if (directory.length === 0) return textResult("no channel memberships", { count: 0 });
+        const lines = directory.map(
+          (channel) =>
+            `${channel.name ?? "(unnamed)"} — ${channel.channelId} [${channel.channelType}]`,
+        );
+        return textResult(lines.join("\n"), { count: directory.length, channels: directory });
+      } catch (error) {
+        return asToolError(error);
+      }
+    },
+  };
+}
+
 export function channelHistoryTool(deps: RelayToolDeps): RelayTool {
   return {
     name: "channel_history",
@@ -43,7 +68,7 @@ export function channelHistoryTool(deps: RelayToolDeps): RelayTool {
     parameters: {
       type: "object",
       properties: {
-        channel: { type: "string", description: "Channel id (uuid)" },
+        channel: { type: "string", description: "Channel id (uuid) or channel name" },
         limit: { type: "number", description: `Max messages (default 20, cap ${RESULT_CAP})` },
         since: { type: "number", description: "Unix seconds lower bound (optional)" },
         until: { type: "number", description: "Unix seconds upper bound (optional)" },
@@ -52,8 +77,7 @@ export function channelHistoryTool(deps: RelayToolDeps): RelayTool {
     },
     async execute(_id, params) {
       try {
-        const channel = String(params["channel"] ?? "");
-        requireMembership(deps, channel);
+        const channel = resolveChannel(deps, params["channel"]).channelId;
         const limit = Math.min(Math.max(Number(params["limit"]) || 20, 1), RESULT_CAP);
         const events = await deps.relay.query([
           {
@@ -83,7 +107,7 @@ export function channelSearchTool(deps: RelayToolDeps): RelayTool {
     parameters: {
       type: "object",
       properties: {
-        channel: { type: "string", description: "Channel id (uuid)" },
+        channel: { type: "string", description: "Channel id (uuid) or channel name" },
         query: { type: "string", description: "Search query" },
         limit: { type: "number", description: `Max results (default 20, cap ${RESULT_CAP})` },
       },
@@ -91,10 +115,9 @@ export function channelSearchTool(deps: RelayToolDeps): RelayTool {
     },
     async execute(_id, params) {
       try {
-        const channel = String(params["channel"] ?? "");
         const query = String(params["query"] ?? "").trim();
         if (query === "") throw new ToolRefusal("query must not be empty");
-        requireMembership(deps, channel);
+        const channel = resolveChannel(deps, params["channel"]).channelId;
         const limit = Math.min(Math.max(Number(params["limit"]) || 20, 1), RESULT_CAP);
         const events = await deps.relay.query([
           // NIP-50: relevance order — deliberately not re-sorted by time.
