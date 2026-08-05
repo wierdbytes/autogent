@@ -45,7 +45,13 @@ interface SdkModule {
   };
   ModelRuntime: { create(): Promise<{ getModel(provider: string, id: string): unknown }> };
   /** Present in the real SDK; optional so test fakes stay minimal. */
-  DefaultResourceLoader?: new (options: Record<string, unknown>) => { reload(): Promise<void> };
+  DefaultResourceLoader?: new (options: Record<string, unknown>) => {
+    reload(): Promise<void>;
+    /** Names of the loaded extension tools, keyed by extension. */
+    getExtensions(): {
+      extensions: Array<{ tools: Map<string, unknown> | Record<string, unknown> }>;
+    };
+  };
 }
 
 /**
@@ -209,7 +215,7 @@ export class SessionRegistry implements SessionRegistryPort {
     // resource loader; createAgentSession has no direct option for either.
     // Extension sources may be `npm:`/`git:` specifiers — the loader's package
     // manager resolves (and installs) them.
-    let resourceLoader: { reload(): Promise<void> } | undefined;
+    let resourceLoader: InstanceType<NonNullable<SdkModule["DefaultResourceLoader"]>> | undefined;
     const extensions = config.extensions ?? [];
     if ((config.appendSystemPrompt || extensions.length > 0) && sdk.DefaultResourceLoader) {
       resourceLoader = new sdk.DefaultResourceLoader({
@@ -221,13 +227,33 @@ export class SessionRegistry implements SessionRegistryPort {
       await resourceLoader.reload();
     }
 
+    // The sandbox allowlist speaks built-in tool names only; handed to the SDK
+    // as-is it would silently strip the owner-managed surface — extension
+    // tools and relay customTools — from every session (the SDK drops anything
+    // an allowlist does not name). Widen it with the names actually loaded;
+    // switching individual tools off stays an excludeTools job.
+    let tools = config.tools;
+    if (tools && resourceLoader) {
+      const extensionTools = resourceLoader
+        .getExtensions()
+        .extensions.flatMap((extension) =>
+          extension.tools instanceof Map
+            ? [...extension.tools.keys()]
+            : Object.keys(extension.tools ?? {}),
+        );
+      const customTools = (this.deps.customTools ?? [])
+        .map((tool) => (tool as { name?: string } | null)?.name)
+        .filter((name): name is string => typeof name === "string");
+      tools = [...new Set([...tools, ...extensionTools, ...customTools])];
+    }
+
     const { session } = await sdk.createAgentSession({
       cwd: config.cwd,
       agentDir: config.agentDir,
       sessionManager,
       ...(model ? { model } : {}),
       ...(config.thinkingLevel ? { thinkingLevel: config.thinkingLevel } : {}),
-      ...(config.tools ? { tools: config.tools } : {}),
+      ...(tools ? { tools } : {}),
       ...(config.excludeTools ? { excludeTools: config.excludeTools } : {}),
       ...(resourceLoader ? { resourceLoader } : {}),
       ...(this.deps.customTools && this.deps.customTools.length > 0
