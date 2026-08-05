@@ -95,6 +95,13 @@ export interface LifecycleConfig {
   shutdownBudgetSec: number;
 }
 
+export interface BuzzCliConfig {
+  /** Serve `buzz` CLI requests from the model's bash through the broker. */
+  enabled: boolean;
+  /** Subcommand prefixes refused by the broker, e.g. `"agents"` or `"messages delete"`. */
+  denyCommands: string[];
+}
+
 export interface RemoteConfig {
   /**
    * When true the agent is record-configured (remote plan §3.3): the
@@ -123,6 +130,7 @@ export interface AgentConfig {
   scheduler: SchedulerConfig;
   telemetry: TelemetryConfig;
   output: OutputConfig;
+  buzzCli: BuzzCliConfig;
   lifecycle: LifecycleConfig;
   remote: RemoteConfig;
   logLevel: "error" | "warn" | "info" | "debug";
@@ -162,6 +170,7 @@ export function defaultConfig(): AgentConfig {
     },
     telemetry: { enabled: true, coalesceMs: 40, metricsEnabled: true },
     output: { maxMessageBytes: 16_000, oversizePolicy: "split" },
+    buzzCli: { enabled: true, denyCommands: [] },
     lifecycle: { inactivityExitSec: 0, shutdownBudgetSec: 60 },
     remote: { recordConfig: false },
     logLevel: "info",
@@ -258,6 +267,9 @@ export function applyEnv(base: AgentConfig, env = process.env): AgentConfig {
     envNumber("AUTOGENT_SHUTDOWN_BUDGET") ?? next.lifecycle.shutdownBudgetSec;
   next.remote.recordConfig =
     envBool("AUTOGENT_REMOTE_CONFIG") ?? envBool("AUTOGENT_ENGRAM_CONFIG") ?? next.remote.recordConfig;
+
+  next.buzzCli.enabled = envBool("AUTOGENT_BUZZ_CLI") ?? next.buzzCli.enabled;
+  next.buzzCli.denyCommands = envList("AUTOGENT_BUZZ_DENY_COMMANDS") ?? next.buzzCli.denyCommands;
 
   next.output.maxMessageBytes =
     envNumber("AUTOGENT_MAX_MESSAGE_BYTES") ?? next.output.maxMessageBytes;

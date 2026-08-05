@@ -131,10 +131,17 @@ export interface SessionRegistryDeps {
   relayId: string;
   logger: Logger;
   /**
-   * Relay tools (remote plan §5), registered on every session as the SDK's
-   * `customTools`. Opaque here — the registry does not interpret them.
+   * Harness tools registered on every session as the SDK's `customTools`.
+   * Opaque here — the registry does not interpret them.
    */
   customTools?: unknown[];
+  /**
+   * Built-in system prompts injected *before* the owner's
+   * `appendSystemPrompt` (buzz-cli plan §5). A closure so a hot config flip
+   * (e.g. `buzz_cli.enabled`) binds on the next session open without new
+   * wiring; called once per session open.
+   */
+  systemPromptPrelude?: () => readonly string[];
   /** Injected for tests; defaults to importing the real SDK. */
   loadSdk?: () => Promise<SdkModule>;
 }
@@ -222,17 +229,23 @@ export class SessionRegistry implements SessionRegistryPort {
 
     const model = config.model ? await this.#resolveModel(config.model) : undefined;
 
-    // The owner's extra system prompt and extension sources travel through a
-    // resource loader; createAgentSession has no direct option for either.
+    // Extra system prompts and extension sources travel through a resource
+    // loader; createAgentSession has no direct option for either. The builtin
+    // prelude (buzz CLI usage) goes ahead of the owner's appendSystemPrompt so
+    // the owner's instructions read as the more specific, later word.
     // Extension sources may be `npm:`/`git:` specifiers — the loader's package
     // manager resolves (and installs) them.
     let resourceLoader: InstanceType<NonNullable<SdkModule["DefaultResourceLoader"]>> | undefined;
     const extensions = config.extensions ?? [];
-    if ((config.appendSystemPrompt || extensions.length > 0) && sdk.DefaultResourceLoader) {
+    const appendPrompts = [
+      ...(this.deps.systemPromptPrelude?.() ?? []),
+      ...(config.appendSystemPrompt ? [config.appendSystemPrompt] : []),
+    ];
+    if ((appendPrompts.length > 0 || extensions.length > 0) && sdk.DefaultResourceLoader) {
       resourceLoader = new sdk.DefaultResourceLoader({
         cwd: config.cwd,
         agentDir: config.agentDir,
-        ...(config.appendSystemPrompt ? { appendSystemPrompt: [config.appendSystemPrompt] } : {}),
+        ...(appendPrompts.length > 0 ? { appendSystemPrompt: appendPrompts } : {}),
         ...(extensions.length > 0 ? { additionalExtensionPaths: extensions } : {}),
       });
       await resourceLoader.reload();
@@ -240,11 +253,11 @@ export class SessionRegistry implements SessionRegistryPort {
 
     // The sandbox allowlist speaks built-in tool names only; handed to the SDK
     // as-is it would silently strip the owner-managed surface — extension
-    // tools and relay customTools — from every session (the SDK drops anything
-    // an allowlist does not name). Widen it with the names actually loaded;
-    // switching individual tools off stays an excludeTools job. Note this must
-    // not depend on the resource loader: profiles without appendSystemPrompt
-    // or extensions never build one, yet their relay customTools still need
+    // tools and harness customTools — from every session (the SDK drops
+    // anything an allowlist does not name). Widen it with the names actually
+    // loaded; switching individual tools off stays an excludeTools job. Note
+    // this must not depend on the resource loader: profiles without extra
+    // prompts or extensions never build one, yet their customTools still need
     // naming in the allowlist.
     let tools = config.tools;
     if (tools) {

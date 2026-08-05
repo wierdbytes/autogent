@@ -15,18 +15,17 @@
  * machinery, so the socket became a proxy — same trust shape: the harness
  * signs per request, the transport carries tokens, never keys.)
  *
- * `git_repos` handles discovery: NIP-34 kind 30617 announcements, rewritten
- * to proxy clone URLs.
+ * Discovery is the buzz CLI's job (`buzz repos list`); the broker rewrites
+ * the relay clone URLs in its output to this proxy and back (buzz-cli plan
+ * §3), so the proxy itself stays a pure transport.
  */
 
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { URL } from "node:url";
 import type { AgentEventBuilder } from "../nostr/event-builder.js";
-import { KIND, tagValue, type NostrEvent } from "../nostr/types.js";
 import type { Clock, Logger } from "../runtime/ports.js";
 import { nip98Header } from "./http-auth.js";
-import { asToolError, textResult, type RelayTool, type RelayToolDeps } from "./deps.js";
 
 const REPO_PATH = /^\/git\/([0-9a-f]{64})\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})(\/.*)?$/;
 
@@ -112,54 +111,4 @@ export class GitAuthProxy {
   }
 }
 
-export function gitReposTool(deps: RelayToolDeps, proxy: GitAuthProxy): RelayTool {
-  return {
-    name: "git_repos",
-    label: "List relay git repositories",
-    description:
-      "Discover git repositories announced on the relay (NIP-34) and get clone URLs that work " +
-      "with the plain `git` CLI in this workspace (authentication is handled transparently).",
-    parameters: {
-      type: "object",
-      properties: {
-        owner: { type: "string", description: "Filter by owner pubkey (64 hex, optional)" },
-      },
-    },
-    async execute(_id, params) {
-      try {
-        const owner = String(params["owner"] ?? "").trim();
-        const filters = [
-          {
-            kinds: [KIND.GIT_REPO_ANNOUNCEMENT],
-            limit: 100,
-            ...(owner !== "" ? { authors: [owner] } : {}),
-          },
-        ];
-        const events = await deps.relay.query(filters);
-        if (events.length === 0) return textResult("no repositories announced on this relay");
 
-        const port = await proxy.ensureStarted();
-        const lines = dedupeByAddress(events).map((event) => {
-          const name = tagValue(event, "d") ?? "(unnamed)";
-          const description = tagValue(event, "description") ?? "";
-          const cloneUrl = `http://127.0.0.1:${port}/git/${event.pubkey}/${name}`;
-          return `${name} — owner ${event.pubkey.slice(0, 12)}…${description ? `\n  ${description}` : ""}\n  clone: git clone ${cloneUrl}`;
-        });
-        return textResult(lines.join("\n"), { count: lines.length });
-      } catch (error) {
-        return asToolError(error);
-      }
-    },
-  };
-}
-
-/** Announcements are replaceable by (author, d); keep the newest of each. */
-function dedupeByAddress(events: NostrEvent[]): NostrEvent[] {
-  const byAddress = new Map<string, NostrEvent>();
-  for (const event of events) {
-    const address = `${event.pubkey}:${tagValue(event, "d") ?? ""}`;
-    const existing = byAddress.get(address);
-    if (!existing || existing.created_at < event.created_at) byAddress.set(address, event);
-  }
-  return [...byAddress.values()];
-}

@@ -3,9 +3,11 @@
  *
  * Everything the agent knows about *who it is* lives here: the secret key, the
  * pairing request it issued, the owner pubkey and the canonical NIP-OA `auth`
- * tag. The secret is reachable only as a {@link Signer}; no code path returns
- * the raw bytes, so a leaked config dump or a `JSON.stringify` of the store
- * cannot carry key material.
+ * tag. The secret is normally reachable only as a {@link Signer}; the single
+ * exception is {@link SecretBackend.loadSecretHex}, which exists for the buzz
+ * CLI broker (the CLI authenticates via `BUZZ_PRIVATE_KEY` and nothing else).
+ * A leaked config dump or a `JSON.stringify` of the store still cannot carry
+ * key material.
  *
  * ## Known limitation
  *
@@ -117,6 +119,14 @@ export interface SecretBackend {
   /** Writes the secret. Refuses to clobber an existing one unless `replace`. */
   seal(secret: Uint8Array, replace?: boolean): Promise<void>;
   loadSigner(): Promise<Signer>;
+  /**
+   * The secret as 64-char hex — the one sanctioned exception to "signer
+   * only" (buzz-cli plan §3): the buzz CLI authenticates exclusively through
+   * `BUZZ_PRIVATE_KEY` in its (broker-spawned) environment, so the broker
+   * needs the raw material. Callers must keep it in a closure and never put
+   * it in `process.env`, a config object, or a log line.
+   */
+  loadSecretHex(): Promise<string>;
 }
 
 async function writeFileAtomic(path: string, data: string, mode: number): Promise<void> {
@@ -179,6 +189,23 @@ export class FileSecretBackend implements SecretBackend {
       raw.fill(0);
     }
   }
+
+  async loadSecretHex(): Promise<string> {
+    let raw: Buffer;
+    try {
+      raw = await readFile(this.location);
+    } catch {
+      throw new ProvisioningError(
+        "secret-missing",
+        `no agent secret at ${this.location} — run 'autogent-nostr init' first`,
+      );
+    }
+    try {
+      return Buffer.from(decodeSecretKey(raw.toString("utf8"))).toString("hex");
+    } finally {
+      raw.fill(0);
+    }
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -217,9 +244,14 @@ export class IdentityStore {
     await this.backend.seal(secret, replace);
   }
 
-  /** The only way to reach the key. Never returns or retains the raw bytes. */
+  /** The primary way to reach the key: a capability, not bytes. */
   async loadSigner(): Promise<Signer> {
     return this.backend.loadSigner();
+  }
+
+  /** Raw secret hex for the buzz CLI broker — see {@link SecretBackend.loadSecretHex}. */
+  async loadSecretHex(): Promise<string> {
+    return this.backend.loadSecretHex();
   }
 
   async readRecord(): Promise<IdentityRecord | null> {

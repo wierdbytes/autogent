@@ -1,7 +1,10 @@
 # buzz CLI вместо кастомных relay-тулзов — план реализации
 
 **Дата:** 2026-08-05
-**Статус:** Design / implementation plan
+**Статус:** Implemented (PR-1…PR-3 одной серией; `buzz_cli.enabled` default **true**,
+т.к. кастомные тулзы удалены сразу; пин `BUZZ_REV=014562c063ea`; промпт живёт
+в `src/prompts/buzz-cli.ts` — tsc не копирует .md в dist; шим — `scripts/buzz-shim.cjs`,
+репо имеет `"type": "module"`)
 **База:** [`20260804-remote-nodes.md`](20260804-remote-nodes.md) (текущая архитектура рантайма и тулзов)
 **Изменения в Buzz:** не планируются — buzz используется только как read-only
 источник исходников `buzz-cli` (публичный `github.com/block/buzz`, пин по SHA)
@@ -219,11 +222,11 @@ Node-скрипт (node уже в образе): собрать `argv`+`cwd`+std
 3. **PR-3** — удаление 7 кастомных тулзов, сжатие `RelayToolDeps`, чистка
    тестов. После подтверждения работоспособности CLI-пути живыми агентами.
 
-## 10. Открытые вопросы
+## 10. Открытые вопросы — разрешены при реализации
 
-1. **Скачивание media:** в CLI есть `buzz upload file`, download-команды нет.
-   Если GET медиа на релее требует NIP-98 — расширить loopback-proxy
-   (`GitAuthProxy`-паттерн) на `/media/*`. Проверить требования релея.
-2. **`buzz agents draft-create/draft-update`** требуют наш `BUZZ_AUTH_TAG` —
-   разрешать по умолчанию или добавить `"agents"` в дефолтный
-   `deny_commands`?
+1. **Скачивание media:** снято — в запиненном CLI есть группа `buzz media`
+   («Upload and download relay Blossom media»); Blossom-аутентификацию CLI минтит
+   сам, расширять loopback-proxy не понадобилось (`blossomHeader` удалён).
+2. **`buzz agents`** разрешены по умолчанию (решение владельца); дефолтный
+   `deny_commands` пуст, закрыть группу можно конфиг-рекордом:
+   `{"buzz_cli":{"deny_commands":["agents"]}}`.

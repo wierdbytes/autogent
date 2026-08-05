@@ -5,6 +5,28 @@
 # presence farewell and close the relay. tini is PID 1 purely for signal
 # forwarding and zombie reaping of model-spawned tools; it execs nothing else.
 
+# --- stage 1: buzz-cli -------------------------------------------------------
+# The real `buzz` binary (buzz-cli plan §2), pinned by SHA so the CLI surface
+# only moves when BUZZ_REV is bumped deliberately. Built from the public
+# workspace; buzz itself needs no changes. rust:1-slim-bookworm shares Debian
+# bookworm with node:22-slim, so the dynamically-linked glibc binary just runs.
+ARG BUZZ_REV=014562c063eae6ab1b7c6e3d20f2be3024c5f3a8
+FROM rust:1-slim-bookworm AS buzz-cli
+ARG BUZZ_REV
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git pkg-config libssl-dev ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN git init . \
+ && git remote add origin https://github.com/block/buzz \
+ && git fetch --depth 1 origin ${BUZZ_REV} \
+ && git checkout FETCH_HEAD
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release -p buzz-cli \
+ && cp target/release/buzz /buzz-real
+
+# --- stage 2: autogent build -------------------------------------------------
 FROM node:22-slim AS build
 # node-gyp toolchain: better-sqlite3 compiles from source when no prebuilt
 # binary matches (slim image ships none of these). Build stage only — the
@@ -32,6 +54,12 @@ WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
+
+# The real buzz CLI lives outside PATH; what the model's bash finds under
+# `buzz` is the shim, which brokers through the harness (key never enters the
+# bash environment). See src/tools/buzz-broker.ts.
+COPY --from=buzz-cli /buzz-real /opt/buzz/buzz-real
+COPY --chmod=755 scripts/buzz-shim.cjs /usr/local/bin/buzz
 
 USER agent
 

@@ -23,9 +23,10 @@ function channelsStub(): ChannelRepository {
 interface FakeSdkOptions {
   extensionTools: Map<string, string[]>;
   capture: (options: Record<string, unknown>) => void;
+  captureLoader?: (options: Record<string, unknown>) => void;
 }
 
-function fakeSdk({ extensionTools, capture }: FakeSdkOptions) {
+function fakeSdk({ extensionTools, capture, captureLoader }: FakeSdkOptions) {
   return {
     async createAgentSession(options: Record<string, unknown>) {
       capture(options);
@@ -52,7 +53,9 @@ function fakeSdk({ extensionTools, capture }: FakeSdkOptions) {
     },
     ModelRuntime: { create: async () => ({ getModel: () => ({}) }) },
     DefaultResourceLoader: class {
-      constructor(private readonly options: Record<string, unknown>) {}
+      constructor(private readonly options: Record<string, unknown>) {
+        captureLoader?.(options);
+      }
       async reload(): Promise<void> {}
       getExtensions() {
         return {
@@ -131,6 +134,64 @@ describe("SessionRegistry tool allowlist", () => {
 
     expect(captured["resourceLoader"]).toBeUndefined();
     expect(captured["tools"]).toEqual(["read", "bash", "send_message"]);
+  });
+
+  it("injects the builtin prelude ahead of the owner's appendSystemPrompt", async () => {
+    let loaderOptions: Record<string, unknown> = {};
+    const registry = new SessionRegistry({
+      config: { cwd: "/tmp/workspace", appendSystemPrompt: "owner instructions" },
+      channels: channelsStub(),
+      relayId: "relay",
+      logger: nullLogger,
+      systemPromptPrelude: () => ["## Buzz CLI\nbuiltin usage"],
+      loadSdk: async () =>
+        fakeSdk({
+          extensionTools: new Map(),
+          capture: () => {},
+          captureLoader: (options) => {
+            loaderOptions = options;
+          },
+        }) as never,
+    });
+
+    await registry.acquire("channel-1");
+
+    expect(loaderOptions["appendSystemPrompt"]).toEqual([
+      "## Buzz CLI\nbuiltin usage",
+      "owner instructions",
+    ]);
+  });
+
+  it("builds a resource loader for the prelude alone, and none when it is empty", async () => {
+    let captured: Record<string, unknown> = {};
+    let loaderBuilt = false;
+    const make = (prelude: string[]) =>
+      new SessionRegistry({
+        config: { cwd: "/tmp/workspace" },
+        channels: channelsStub(),
+        relayId: "relay",
+        logger: nullLogger,
+        systemPromptPrelude: () => prelude,
+        loadSdk: async () =>
+          fakeSdk({
+            extensionTools: new Map(),
+            capture: (options) => {
+              captured = options;
+            },
+            captureLoader: () => {
+              loaderBuilt = true;
+            },
+          }) as never,
+      });
+
+    await make(["builtin"]).acquire("channel-1");
+    expect(loaderBuilt).toBe(true);
+    expect(captured["resourceLoader"]).toBeDefined();
+
+    loaderBuilt = false;
+    await make([]).acquire("channel-1");
+    expect(loaderBuilt).toBe(false);
+    expect(captured["resourceLoader"]).toBeUndefined();
   });
 
   it("leaves sessions without an allowlist unrestricted", async () => {

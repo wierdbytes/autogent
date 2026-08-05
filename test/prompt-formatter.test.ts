@@ -113,6 +113,26 @@ describe("event block", () => {
     expect(formatPrimaryPrompt({ event, channel: CHANNEL })).toContain("published to this channel automatically");
   });
 
+  it("hints the buzz CLI history command with the concrete channel id", () => {
+    const event = chatEvent({ channelId: CHANNEL.channelId, content: "hi" });
+    const prompt = formatPrimaryPrompt({ event, channel: CHANNEL });
+    expect(prompt).toContain(`buzz messages get --channel ${CHANNEL.channelId}`);
+    expect(prompt).toContain(`buzz messages thread --channel ${CHANNEL.channelId}`);
+  });
+
+  it("hints the thread command with the concrete root id when threaded", () => {
+    const root = chatEvent({ channelId: CHANNEL.channelId, content: "root" });
+    const reply = replyEvent({
+      channelId: CHANNEL.channelId,
+      content: "nested",
+      rootEventId: root.id,
+    });
+    const prompt = formatPrimaryPrompt({ event: reply, channel: CHANNEL });
+    expect(prompt).toContain(
+      `buzz messages thread --channel ${CHANNEL.channelId} --event ${root.id}`,
+    );
+  });
+
   it("includes conversation context when supplied", () => {
     const event = chatEvent({ channelId: CHANNEL.channelId, content: "now what?" });
     const prompt = formatPrimaryPrompt({

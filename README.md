@@ -348,11 +348,13 @@ The shape of it:
   --agent <pubkey>` remains the per-identity escape hatch. The agent writes
   refreshed tokens back, so a Pod recreated with an empty PVC recovers them
   from the relay.
-- **Relay tools** in the Pod: `channel_history`/`channel_search` (NIP-50),
-  `media_get`/`media_put` (Blossom), `git_repos` + a loopback NIP-98 auth proxy
-  that lets the stock `git` CLI clone/push the relay's repos without the key
-  ever entering the bash environment, and `send_message` (cross-posting through
-  the durable outbox).
+- **buzz CLI** in the Pod: the model drives the relay (messages, channels,
+  media, repos/issues/PRs, …) through the stock `buzz` CLI. What bash finds
+  under `buzz` is a shim that brokers through the harness over a unix socket,
+  so `BUZZ_PRIVATE_KEY` never enters the bash environment; the loopback
+  NIP-98 auth proxy still lets the stock `git` CLI clone/push the relay's
+  repos the same way. Feature-flagged by the `buzz_cli` config-record section
+  (`enabled`, `deny_commands`).
 
 Setup, in order:
 

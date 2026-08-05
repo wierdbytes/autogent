@@ -14,6 +14,7 @@ describe("parseCoreConfig", () => {
         tools: { include: ["read", "bash"], exclude: ["write"] },
         extensions: ["npm:@wierdbytes/pi-anthropic", "npm:@acme/pi-extra"],
         scheduler: { max_concurrent_turns: 2, context_message_limit: 6 },
+        buzz_cli: { enabled: false, deny_commands: ["agents"] },
         inactivity_exit_sec: 7200,
       });
     expect(problems).toEqual([]);
@@ -23,8 +24,15 @@ describe("parseCoreConfig", () => {
       thinking: "high",
       respond_to: "allowlist",
       extensions: ["npm:@wierdbytes/pi-anthropic", "npm:@acme/pi-extra"],
+      buzz_cli: { enabled: false, deny_commands: ["agents"] },
       inactivity_exit_sec: 7200,
     });
+  });
+
+  it("rejects malformed buzz_cli fields", () => {
+    expect(parseCoreConfig({ v: 1, buzz_cli: { enabled: "yes" } }).config).toBeNull();
+    expect(parseCoreConfig({ v: 1, buzz_cli: { deny_commands: [1] } }).config).toBeNull();
+    expect(parseCoreConfig({ v: 1, buzz_cli: "on" }).config).toBeNull();
   });
 
   it("rejects a non-string-list extensions field", () => {
@@ -99,6 +107,22 @@ describe("applyCoreConfig", () => {
 
     const silent = applyCoreConfig(base, { v: 1 });
     expect(silent.pi.extensions).toEqual(base.pi.extensions);
+  });
+
+  it("applies buzz_cli and keeps the base where silent", () => {
+    const base = defaultConfig();
+    expect(base.buzzCli.enabled).toBe(true);
+
+    const flipped = applyCoreConfig(base, {
+      v: 1,
+      buzz_cli: { enabled: false, deny_commands: ["agents", "messages delete"] },
+    });
+    expect(flipped.buzzCli.enabled).toBe(false);
+    expect(flipped.buzzCli.denyCommands).toEqual(["agents", "messages delete"]);
+
+    const silent = applyCoreConfig(base, { v: 1, buzz_cli: {} });
+    expect(silent.buzzCli.enabled).toBe(true);
+    expect(silent.buzzCli.denyCommands).toEqual([]);
   });
 
   it("overrides the respond-to surface atomically", () => {

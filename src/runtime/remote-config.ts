@@ -21,6 +21,8 @@ export interface CoreConfigV1 {
   /** Pi extension sources (paths or `npm:`/`git:` specifiers), replacing the base list. */
   extensions?: string[];
   scheduler?: { max_concurrent_turns?: number; context_message_limit?: number };
+  /** buzz CLI broker feature flag and subcommand denylist (buzz-cli plan §7). */
+  buzz_cli?: { enabled?: boolean; deny_commands?: string[] };
   /** 0 is a legal "run indefinitely". */
   inactivity_exit_sec?: number;
 }
@@ -149,6 +151,22 @@ export function parseCoreConfig(document: unknown): ParsedCoreConfig {
     }
   }
 
+  const buzzCli = asObject(object["buzz_cli"]);
+  if (object["buzz_cli"] !== undefined && object["buzz_cli"] !== null) {
+    if (!buzzCli) problems.push("buzz_cli must be an object");
+    else {
+      const enabled = buzzCli["enabled"];
+      if (enabled !== undefined && enabled !== null && typeof enabled !== "boolean") {
+        problems.push("buzz_cli.enabled must be a boolean");
+      }
+      const denyCommands = optionalStringList(buzzCli, "deny_commands", problems);
+      config.buzz_cli = {
+        ...(typeof enabled === "boolean" ? { enabled } : {}),
+        ...(denyCommands !== undefined ? { deny_commands: denyCommands } : {}),
+      };
+    }
+  }
+
   const inactivity = optionalNonNegative(object, "inactivity_exit_sec", problems);
   if (inactivity !== undefined) config.inactivity_exit_sec = Math.floor(inactivity);
 
@@ -179,6 +197,10 @@ export function applyCoreConfig(base: AgentConfig, core: CoreConfigV1): AgentCon
   }
   if (core.scheduler?.context_message_limit !== undefined) {
     next.scheduler.contextMessageLimit = core.scheduler.context_message_limit;
+  }
+  if (core.buzz_cli?.enabled !== undefined) next.buzzCli.enabled = core.buzz_cli.enabled;
+  if (core.buzz_cli?.deny_commands !== undefined) {
+    next.buzzCli.denyCommands = core.buzz_cli.deny_commands;
   }
   if (core.inactivity_exit_sec !== undefined) next.lifecycle.inactivityExitSec = core.inactivity_exit_sec;
   return next;

@@ -72,14 +72,18 @@ function actor(pubkey: string, label: string | null | undefined, npub: string | 
 /**
  * The `[Context]` section.
  *
- * Unlike buzz-acp this carries no `buzz messages send` instructions: replies are
- * published automatically from the turn's immutable reply target, and telling
- * the model otherwise would invite it to try to control routing it does not own.
+ * The buzz CLI hints carry the concrete channel UUID (and thread root) so the
+ * model can read history without guessing identifiers, in the style of
+ * buzz-acp's context block. Unlike buzz-acp, the *reply* instruction stays
+ * inverted: the visible answer is published automatically from the turn's
+ * immutable reply target, and telling the model otherwise would invite it to
+ * try to control routing it does not own.
  */
 function formatContextSection(args: FormatPromptArgs): string {
   const { rootEventId, replyEventId } = parseThreadTags(args.event.tags);
   const isDm = args.channel.channelType === "dm";
   const scope = isDm ? "dm" : rootEventId ? "thread" : "channel";
+  const channelId = args.channel.channelId;
 
   const lines = [`[Context]`, `Scope: ${scope}`, `Channel: ${channelDisplay(args.channel)}`];
   if (rootEventId) {
@@ -88,6 +92,9 @@ function formatContextSection(args: FormatPromptArgs): string {
   }
   lines.push(
     "Replies: your visible answer is published to this channel automatically as a reply to the triggering message. Do not attempt to send it yourself.",
+    rootEventId
+      ? `Buzz CLI: \`buzz messages thread --channel ${channelId} --event ${rootEventId}\` reads this thread; \`buzz messages get --channel ${channelId}\` reads recent channel history.`
+      : `Buzz CLI: \`buzz messages get --channel ${channelId}\` reads recent channel history; \`buzz messages thread --channel ${channelId} --event <root-id>\` reads a thread.`,
   );
   return lines.join("\n");
 }

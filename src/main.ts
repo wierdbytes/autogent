@@ -205,6 +205,9 @@ export async function run(options: RunOptions = {}): Promise<number> {
   }
 
   const signer = await store.loadSigner();
+  // Raw hex for the buzz CLI broker only (buzz-cli plan §3): held in the
+  // broker's closure, never re-exported to process.env or config.
+  const buzzSecretHex = await store.loadSecretHex();
   const scrubbed = scrubProcessEnv();
   if (scrubbed.length > 0) logger.debug("scrubbed bootstrap secrets", { count: scrubbed.length });
 
@@ -231,6 +234,7 @@ export async function run(options: RunOptions = {}): Promise<number> {
     ownerPubkey: record.ownerPubkey,
     authTag: record.auth,
     logger,
+    buzzSecretHex,
     ...(relay ? { relay } : {}),
     ...(remote ? { remote } : {}),
   });
