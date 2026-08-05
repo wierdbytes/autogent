@@ -105,6 +105,34 @@ describe("SessionRegistry tool allowlist", () => {
     ]);
   });
 
+  it("widens the allowlist with relay tools even without a resource loader", async () => {
+    // Profiles with neither appendSystemPrompt nor extensions never build a
+    // DefaultResourceLoader; the relay customTools must still reach the model.
+    let captured: Record<string, unknown> = {};
+    const registry = new SessionRegistry({
+      config: {
+        cwd: "/tmp/workspace",
+        tools: ["read", "bash"],
+      },
+      channels: channelsStub(),
+      relayId: "relay",
+      logger: nullLogger,
+      customTools: [{ name: "send_message" }],
+      loadSdk: async () =>
+        fakeSdk({
+          extensionTools: new Map(),
+          capture: (options) => {
+            captured = options;
+          },
+        }) as never,
+    });
+
+    await registry.acquire("channel-1");
+
+    expect(captured["resourceLoader"]).toBeUndefined();
+    expect(captured["tools"]).toEqual(["read", "bash", "send_message"]);
+  });
+
   it("leaves sessions without an allowlist unrestricted", async () => {
     let captured: Record<string, unknown> = {};
     const registry = new SessionRegistry({

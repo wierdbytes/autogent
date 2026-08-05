@@ -236,16 +236,21 @@ export class SessionRegistry implements SessionRegistryPort {
     // as-is it would silently strip the owner-managed surface — extension
     // tools and relay customTools — from every session (the SDK drops anything
     // an allowlist does not name). Widen it with the names actually loaded;
-    // switching individual tools off stays an excludeTools job.
+    // switching individual tools off stays an excludeTools job. Note this must
+    // not depend on the resource loader: profiles without appendSystemPrompt
+    // or extensions never build one, yet their relay customTools still need
+    // naming in the allowlist.
     let tools = config.tools;
-    if (tools && resourceLoader) {
+    if (tools) {
       const extensionTools = resourceLoader
-        .getExtensions()
-        .extensions.flatMap((extension) =>
-          extension.tools instanceof Map
-            ? [...extension.tools.keys()]
-            : Object.keys(extension.tools ?? {}),
-        );
+        ? resourceLoader
+            .getExtensions()
+            .extensions.flatMap((extension) =>
+              extension.tools instanceof Map
+                ? [...extension.tools.keys()]
+                : Object.keys(extension.tools ?? {}),
+            )
+        : [];
       const customTools = (this.deps.customTools ?? [])
         .map((tool) => (tool as { name?: string } | null)?.name)
         .filter((name): name is string => typeof name === "string");
