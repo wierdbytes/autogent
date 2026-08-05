@@ -21,6 +21,7 @@
 
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { RespondToMode } from "../config.js";
 import {
   ownerAuthRoot,
   recordBinding,
@@ -31,7 +32,45 @@ import {
 /** DNS-label shape: it doubles as the enum value in the GUI drop-down. */
 export const PROFILE_NAME_RE = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/;
 
-export interface DeployProfile {
+/**
+ * The agent-behaviour settings the owner configures in the wizard. The
+ * profile is the *sole source* for these: whatever the GUI payload carries
+ * (model, system prompt, respond gate) is ignored at deploy — Buzz Desktop's
+ * remaining surface is picking the profile.
+ */
+export interface AgentSettings {
+  /** Provider-qualified model id (`anthropic/claude-sonnet-4-5`); null = pi default. */
+  model: string | null;
+  /** Thinking/effort level (`off`…`max`); null = pi default. */
+  thinking: string | null;
+  /** Extra system prompt appended to pi's; null = none. */
+  systemPrompt: string | null;
+  respondTo: RespondToMode;
+  /** Hex pubkeys; only meaningful when respondTo === "allowlist". */
+  respondToAllowlist: string[];
+  /** Tool allowlist (empty = pi default set). */
+  toolsInclude: string[];
+  /** Tool denylist (empty = none). */
+  toolsExclude: string[];
+  /** Max parallel channel turns; null = runtime default. */
+  maxConcurrentTurns: number | null;
+  /** Prior messages fetched per turn; null = runtime default. */
+  contextMessageLimit: number | null;
+}
+
+export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
+  model: null,
+  thinking: null,
+  systemPrompt: null,
+  respondTo: "owner-only",
+  respondToAllowlist: [],
+  toolsInclude: [],
+  toolsExclude: [],
+  maxConcurrentTurns: null,
+  contextMessageLimit: null,
+};
+
+export interface DeployProfile extends AgentSettings {
   name: string;
   createdAt: number;
   /** kubeconfig context; null = current context. */
@@ -83,12 +122,37 @@ function isProfile(value: unknown): value is DeployProfile {
   );
 }
 
-/** Registry files written before the field existed get an empty list. */
-function normalize(profile: DeployProfile): DeployProfile {
-  const extensions = Array.isArray(profile.extensions)
-    ? profile.extensions.filter((item): item is string => typeof item === "string" && item !== "")
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item !== "")
     : [];
-  return { ...profile, extensions };
+}
+
+const RESPOND_TO_MODES: readonly RespondToMode[] = ["owner-only", "allowlist", "anyone", "nobody"];
+
+/** Registry files written before a field existed get that field's default. */
+function normalize(profile: DeployProfile): DeployProfile {
+  const raw = profile as Partial<Record<keyof DeployProfile, unknown>>;
+  const optionalString = (value: unknown): string | null =>
+    typeof value === "string" && value !== "" ? value : null;
+  const optionalCount = (value: unknown): number | null =>
+    typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : null;
+  const respondTo = RESPOND_TO_MODES.includes(raw.respondTo as RespondToMode)
+    ? (raw.respondTo as RespondToMode)
+    : DEFAULT_AGENT_SETTINGS.respondTo;
+  return {
+    ...profile,
+    extensions: stringList(raw.extensions),
+    model: optionalString(raw.model),
+    thinking: optionalString(raw.thinking),
+    systemPrompt: optionalString(raw.systemPrompt),
+    respondTo,
+    respondToAllowlist: stringList(raw.respondToAllowlist),
+    toolsInclude: stringList(raw.toolsInclude),
+    toolsExclude: stringList(raw.toolsExclude),
+    maxConcurrentTurns: optionalCount(raw.maxConcurrentTurns),
+    contextMessageLimit: optionalCount(raw.contextMessageLimit),
+  };
 }
 
 export async function readProfiles(root = ownerAuthRoot()): Promise<DeployProfile[]> {

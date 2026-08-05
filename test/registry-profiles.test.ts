@@ -20,6 +20,7 @@ import { deployToK8s } from "../src/backend-k8s/deploy.js";
 import { handleRequest } from "../src/backend-k8s/main.js";
 import { agentAuthPath, readBindings } from "../src/owner-auth/store.js";
 import {
+  DEFAULT_AGENT_SETTINGS,
   PROFILE_NAME_RE,
   adoptProfileCredential,
   getProfile,
@@ -46,6 +47,7 @@ function profile(overrides: Partial<DeployProfile> = {}): DeployProfile {
     storageSize: "2Gi",
     inactivitySeconds: 7200,
     extensions: [],
+    ...DEFAULT_AGENT_SETTINGS,
     agentPubkey: null,
     lastDeployedAt: null,
     ...overrides,
@@ -87,6 +89,50 @@ describe("profile registry", () => {
       JSON.stringify({ version: 1, profiles: [legacy] }),
     );
     expect((await getProfile("my-agent"))?.extensions).toEqual([]);
+  });
+
+  it("normalizes profiles written before the agent-settings fields existed", async () => {
+    const legacy = profile() as unknown as Record<string, unknown>;
+    for (const key of Object.keys(DEFAULT_AGENT_SETTINGS)) delete legacy[key];
+    await writeFile(
+      join(root, "registry.json"),
+      JSON.stringify({ version: 1, profiles: [legacy] }),
+    );
+    expect(await getProfile("my-agent")).toMatchObject(DEFAULT_AGENT_SETTINGS);
+  });
+
+  it("round-trips agent settings and rejects malformed stored values", async () => {
+    await saveProfile(
+      profile({
+        model: "anthropic/claude-sonnet-4-5",
+        thinking: "high",
+        respondTo: "allowlist",
+        respondToAllowlist: ["a".repeat(64)],
+        maxConcurrentTurns: 2,
+      }),
+    );
+    expect(await getProfile("my-agent")).toMatchObject({
+      model: "anthropic/claude-sonnet-4-5",
+      thinking: "high",
+      respondTo: "allowlist",
+      respondToAllowlist: ["a".repeat(64)],
+      maxConcurrentTurns: 2,
+    });
+
+    // A hand-edited registry with junk values falls back to the defaults.
+    const mangled = profile() as unknown as Record<string, unknown>;
+    mangled["respondTo"] = "everyone-please";
+    mangled["maxConcurrentTurns"] = -3;
+    mangled["model"] = 42;
+    await writeFile(
+      join(root, "registry.json"),
+      JSON.stringify({ version: 1, profiles: [mangled] }),
+    );
+    expect(await getProfile("my-agent")).toMatchObject({
+      respondTo: "owner-only",
+      maxConcurrentTurns: null,
+      model: null,
+    });
   });
 
   it("reads an empty list from a missing or corrupt registry", async () => {
@@ -220,7 +266,7 @@ describe("deploy through a profile", () => {
         payload,
         config: providerConfigFromProfile(profile()),
         nsec: minted.nsec,
-        profileName: "my-agent",
+        profile: profile(),
       }),
     ).rejects.toThrow(/no provider credentials.*'my-agent' has no stored login/s);
   });
@@ -238,7 +284,7 @@ describe("deploy through a profile", () => {
         payload,
         config: providerConfigFromProfile(profile()),
         nsec: minted.nsec,
-        profileName: "my-agent",
+        profile: profile(),
       }),
     ).rejects.toThrow(/already bound to agent.*different account/s);
   });

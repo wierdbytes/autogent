@@ -70,7 +70,7 @@ export async function handleRequest(input: string): Promise<ProviderResponse> {
     payload,
     config,
     nsec: rawNsec(request.agent),
-    profileName,
+    profile,
   });
   // Bookkeeping, not liveness (I3): best-effort — a registry write failure
   // must not turn a successful deploy into a reported error.

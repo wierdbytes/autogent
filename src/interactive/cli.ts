@@ -16,9 +16,11 @@
  */
 
 import { realpathSync } from "node:fs";
-import { access } from "node:fs/promises";
+import { access, rm } from "node:fs/promises";
+import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import * as p from "@clack/prompts";
+import type { RespondToMode } from "../config.js";
 import {
   DEFAULT_IMAGE,
   DEFAULT_INACTIVITY_SECONDS,
@@ -31,14 +33,17 @@ import {
 import { podVerdict } from "../backend-k8s/deploy.js";
 import { getJson, kubectl } from "../backend-k8s/kubectl.js";
 import { podName } from "../backend-k8s/names.js";
+import { listAuthedCatalog, type AuthedProviderCatalog } from "../owner-auth/catalog.js";
 import { listLoginChoices, runProviderLogin } from "../owner-auth/oauth.js";
 import {
+  DEFAULT_AGENT_SETTINGS,
   PROFILE_NAME_RE,
   ensureProfileAuthDir,
   profileAuthPath,
   readProfiles,
   removeProfile,
   saveProfile,
+  type AgentSettings,
   type DeployProfile,
 } from "../registry/profiles.js";
 
@@ -75,6 +80,21 @@ function deployedHint(profile: DeployProfile, loggedIn: boolean): string {
 }
 
 function profileDetails(profile: DeployProfile, loggedIn: boolean): string {
+  const prompt =
+    profile.systemPrompt === null
+      ? "(none)"
+      : profile.systemPrompt.length > 60
+        ? `${profile.systemPrompt.slice(0, 57)}…`
+        : profile.systemPrompt;
+  const tools =
+    profile.toolsInclude.length === 0 && profile.toolsExclude.length === 0
+      ? "(pi default)"
+      : [
+          profile.toolsInclude.length > 0 ? `include: ${profile.toolsInclude.join(", ")}` : "",
+          profile.toolsExclude.length > 0 ? `exclude: ${profile.toolsExclude.join(", ")}` : "",
+        ]
+          .filter(Boolean)
+          .join(" · ");
   return [
     `kube context:  ${profile.kubeContext ?? "(current)"}`,
     `namespace:     ${profile.namespace}`,
@@ -82,6 +102,12 @@ function profileDetails(profile: DeployProfile, loggedIn: boolean): string {
     `storage:       ${profile.storageSize}${profile.storageClass ? ` (${profile.storageClass})` : " (default class)"}`,
     `extensions:    ${profile.extensions.length > 0 ? profile.extensions.join(", ") : "(none)"}`,
     `idle timeout:  ${profile.inactivitySeconds === 0 ? "unbounded" : `${profile.inactivitySeconds}s`}`,
+    `model:         ${profile.model ?? "(pi default)"}`,
+    `effort:        ${profile.thinking ?? "(model default)"}`,
+    `system prompt: ${prompt}`,
+    `respond to:    ${profile.respondTo}${profile.respondTo === "allowlist" ? ` (${profile.respondToAllowlist.length} pubkey(s))` : ""}`,
+    `tools:         ${tools}`,
+    `scheduler:     ${profile.maxConcurrentTurns ?? "default"} turn(s) · ${profile.contextMessageLimit ?? "default"} context msg(s)`,
     `login:         ${loggedIn ? "OAuth credential stored" : "MISSING — deploy will refuse"}`,
     `identity:      ${profile.agentPubkey ?? "(bound at first deploy from Buzz)"}`,
   ].join("\n");
@@ -161,11 +187,11 @@ const DEFAULT_PARAMS: ProfileParams = {
 };
 
 /**
- * The parameter steps, shared by create and edit. Every step accepts Enter
- * for the default; the kube context is a picker over the ambient kubeconfig.
- * System prompt and model are deliberately absent — those are configured in
- * Buzz Desktop's agent form, and duplicating a setting across two sources is
- * how the two drift.
+ * The substrate parameter steps, shared by create and edit. Every step
+ * accepts Enter for the default; the kube context is a picker over the
+ * ambient kubeconfig. Agent-behaviour settings (model, effort, prompt, …)
+ * live in `promptAgentSettings` — they need the profile's provider login
+ * first, because the model picker only offers authorised providers.
  */
 async function promptParams(initial: ProfileParams): Promise<ProfileParams | null> {
   const spinner = p.spinner();
@@ -264,6 +290,173 @@ async function promptParams(initial: ProfileParams): Promise<ProfileParams | nul
   };
 }
 
+const RESPOND_TO_OPTIONS: readonly { value: RespondToMode; label: string; hint: string }[] = [
+  { value: "owner-only", label: "Owner only", hint: "default" },
+  { value: "allowlist", label: "Allowlist", hint: "owner + listed pubkeys" },
+  { value: "anyone", label: "Anyone", hint: "any relay member" },
+  { value: "nobody", label: "Nobody", hint: "mute the agent" },
+];
+
+const PUBKEY_RE = /^[0-9a-f]{64}$/;
+
+function splitList(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item !== "");
+}
+
+/** Optional positive integer: empty = runtime default. */
+async function promptCount(
+  message: string,
+  initial: number | null,
+): Promise<number | null | undefined> {
+  const typed = await p.text({
+    message,
+    placeholder: "runtime default",
+    initialValue: initial === null ? "" : String(initial),
+    validate: (value) => {
+      if (!value || value.trim() === "") return undefined;
+      const parsed = Number(value);
+      return Number.isInteger(parsed) && parsed >= 1 ? undefined : "positive integer or empty";
+    },
+  });
+  if (cancelled(typed)) return undefined;
+  return typed.trim() === "" ? null : Number(typed);
+}
+
+/**
+ * The agent-behaviour steps: model and effort first — offered *only* for
+ * providers whose login is stored in this profile's auth.json, because those
+ * are the only credentials the deployed Pod will ever hold — then prompt,
+ * respond gate, tools and scheduler ceilings. These fields used to live in
+ * Buzz Desktop's agent form; the profile is their sole source now.
+ */
+async function promptAgentSettings(
+  name: string,
+  initial: AgentSettings,
+): Promise<AgentSettings | null> {
+  const spinner = p.spinner();
+  spinner.start("Loading models for the authorised provider(s)");
+  let catalogs: AuthedProviderCatalog[];
+  try {
+    catalogs = await listAuthedCatalog(profileAuthPath(name));
+  } catch (error) {
+    spinner.stop(`model catalog failed: ${error instanceof Error ? error.message : String(error)}`);
+    catalogs = [];
+  }
+  const models = catalogs.flatMap((catalog) =>
+    catalog.models.map((model) => ({ catalog, model })),
+  );
+  spinner.stop(
+    models.length > 0
+      ? `${models.length} model(s) from ${catalogs.length} authorised provider(s)`
+      : "No models available — no authorised provider credentials found",
+  );
+
+  let model = initial.model;
+  let thinking = initial.thinking;
+  if (models.length > 0) {
+    const picked = await p.select({
+      message: "Model",
+      initialValue: initial.model ?? "",
+      options: [
+        { value: "", label: "Pi default", hint: "let the runtime pick" },
+        ...models.map(({ catalog, model: entry }) => ({
+          value: entry.ref,
+          label: `${catalog.providerName} · ${entry.name}`,
+          hint: entry.reasoning ? "reasoning" : undefined,
+        })),
+      ],
+    });
+    if (cancelled(picked)) return null;
+    model = picked === "" ? null : picked;
+
+    const chosen = models.find(({ model: entry }) => entry.ref === model)?.model;
+    if (chosen && chosen.reasoning && chosen.thinkingLevels.length > 0) {
+      const effort = await p.select({
+        message: "Reasoning effort",
+        initialValue:
+          initial.thinking !== null && chosen.thinkingLevels.includes(initial.thinking as never)
+            ? initial.thinking
+            : "",
+        options: [
+          { value: "", label: "Model default" },
+          ...chosen.thinkingLevels.map((level) => ({ value: level, label: level })),
+        ],
+      });
+      if (cancelled(effort)) return null;
+      thinking = effort === "" ? null : effort;
+    } else {
+      thinking = null;
+    }
+  } else {
+    p.log.warn(
+      "Keeping the stored model setting — run the login step to pick from authorised providers",
+    );
+  }
+
+  const systemPrompt = await p.text({
+    message: "Extra system prompt (empty = none)",
+    initialValue: initial.systemPrompt ?? "",
+  });
+  if (cancelled(systemPrompt)) return null;
+
+  const respondTo = await p.select({
+    message: "Respond to",
+    initialValue: initial.respondTo,
+    options: [...RESPOND_TO_OPTIONS],
+  });
+  if (cancelled(respondTo)) return null;
+
+  let respondToAllowlist = initial.respondToAllowlist;
+  if (respondTo === "allowlist") {
+    const allowlist = await p.text({
+      message: "Allowlist — comma-separated hex pubkeys",
+      initialValue: initial.respondToAllowlist.join(", "),
+      validate: (value) => {
+        const bad = splitList(value ?? "").find((item) => !PUBKEY_RE.test(item));
+        return bad === undefined ? undefined : `${bad.slice(0, 16)}… is not a 64-hex pubkey`;
+      },
+    });
+    if (cancelled(allowlist)) return null;
+    respondToAllowlist = splitList(allowlist);
+  }
+
+  const toolsInclude = await p.text({
+    message: "Tool allowlist, comma-separated (empty = pi default set)",
+    initialValue: initial.toolsInclude.join(", "),
+  });
+  if (cancelled(toolsInclude)) return null;
+
+  const toolsExclude = await p.text({
+    message: "Tool denylist, comma-separated (empty = none)",
+    initialValue: initial.toolsExclude.join(", "),
+  });
+  if (cancelled(toolsExclude)) return null;
+
+  const maxConcurrentTurns = await promptCount("Max concurrent turns", initial.maxConcurrentTurns);
+  if (maxConcurrentTurns === undefined) return null;
+
+  const contextMessageLimit = await promptCount(
+    "Context messages fetched per turn",
+    initial.contextMessageLimit,
+  );
+  if (contextMessageLimit === undefined) return null;
+
+  return {
+    model,
+    thinking,
+    systemPrompt: systemPrompt.trim() === "" ? null : systemPrompt,
+    respondTo,
+    respondToAllowlist,
+    toolsInclude: splitList(toolsInclude),
+    toolsExclude: splitList(toolsExclude),
+    maxConcurrentTurns,
+    contextMessageLimit,
+  };
+}
+
 /**
  * Runs the mandatory provider-login step: pick any provider pi supports
  * (OAuth or API key), then run its interactive flow. Returns false when it
@@ -310,34 +503,44 @@ async function createWizard(existing: DeployProfile[]): Promise<void> {
   const params = await promptParams(DEFAULT_PARAMS);
   if (params === null) return;
 
-  const profile: DeployProfile = {
+  const substrate = {
     name,
     createdAt: Date.now(),
     ...params,
+    ...DEFAULT_AGENT_SETTINGS,
     agentPubkey: null,
     lastDeployedAt: null,
-  };
+  } satisfies DeployProfile;
 
-  // Validate the whole thing through the deploy-time parser before login, so
+  // Validate the substrate through the deploy-time parser before login, so
   // a bad image reference fails here and not after the OAuth dance.
   try {
-    providerConfigFromProfile(profile);
+    providerConfigFromProfile(substrate);
   } catch (error) {
     p.log.error(error instanceof Error ? error.message : String(error));
     return;
   }
 
-  // Login is strictly mandatory: without it the deploy is fail-closed anyway,
-  // so an unauthenticated profile is never saved.
+  // Login is strictly mandatory — and it runs *before* the agent settings,
+  // because the model/effort pickers only offer authorised providers.
   if (!(await loginStep(name))) {
     p.log.warn("Profile was NOT created — the login step is mandatory");
     return;
   }
 
-  await saveProfile(profile);
+  const settings = await promptAgentSettings(name, DEFAULT_AGENT_SETTINGS);
+  if (settings === null) {
+    // Do not orphan the freshly captured credential of an unsaved profile.
+    await rm(dirname(profileAuthPath(name)), { recursive: true, force: true });
+    p.log.warn("Profile was NOT created — agent settings were not completed");
+    return;
+  }
+
+  await saveProfile({ ...substrate, ...settings });
   p.note(
     `In Buzz Desktop, add an agent with the 'autogent-k8s' backend provider\n` +
-      `and pick the profile '${name}' — that is the only provider setting left there.`,
+      `and pick the profile '${name}' — that is the only provider setting left there.\n` +
+      `Model, effort and the rest of the agent settings live in this profile.`,
     `Profile '${name}' created`,
   );
 }
@@ -359,7 +562,8 @@ async function profileMenu(name: string): Promise<void> {
         ...(profile.agentPubkey !== null
           ? [{ value: "status", label: "Check live status in the cluster (kubectl)" }]
           : []),
-        { value: "edit", label: "Edit parameters" },
+        { value: "edit", label: "Edit substrate parameters (cluster, image, storage)" },
+        { value: "agent", label: "Edit agent settings (model, effort, prompt, …)" },
         { value: "login", label: loggedIn ? "Re-run OAuth login" : "Run OAuth login (missing!)" },
         { value: "delete", label: "Delete profile" },
         { value: "back", label: "Back" },
@@ -385,6 +589,22 @@ async function profileMenu(name: string): Promise<void> {
         continue;
       }
       await saveProfile({ ...profile, ...params });
+      p.log.success(
+        profile.agentPubkey !== null
+          ? "Saved — takes effect on the next deploy from Buzz"
+          : "Saved",
+      );
+      continue;
+    }
+
+    if (action === "agent") {
+      if (!loggedIn) {
+        p.log.warn("Run the login step first — the model picker only offers authorised providers");
+        continue;
+      }
+      const settings = await promptAgentSettings(profile.name, profile);
+      if (settings === null) continue;
+      await saveProfile({ ...profile, ...settings });
       p.log.success(
         profile.agentPubkey !== null
           ? "Saved — takes effect on the next deploy from Buzz"
@@ -479,10 +699,12 @@ Usage:
   autogent list     print the registry non-interactively
   autogent --help   this text
 
-Agents are configured here (kube context, namespace, image, pi extensions,
-storage, idle timeout + the mandatory pi provider login) and then
-selected in Buzz
-Desktop's provider form, which exposes only the profile drop-down.
+Agents are configured here — the substrate (kube context, namespace, image,
+pi extensions, storage, idle timeout), the mandatory pi provider login and
+the agent settings (model, reasoning effort, system prompt, respond gate,
+tools, scheduler ceilings; model/effort offer only providers with a stored
+login) — and then selected in Buzz Desktop's provider form, which exposes
+only the profile drop-down.
 `;
 
 export async function main(argv: string[]): Promise<number> {

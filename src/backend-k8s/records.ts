@@ -3,7 +3,7 @@
  *
  * The provider holds the nsec by design (that is its job in the provider
  * protocol), so it can sign as the agent: the `autogent/config` record is
- * derived from the deploy payload's effective config, and `autogent/auth`
+ * derived from the deploy profile's agent settings, and `autogent/auth`
  * ships the credential file that `autogent auth login` produced. Both are on
  * the relay
  * *before* any k8s object exists, so a Pod never starts into a world where
@@ -15,6 +15,7 @@
  */
 
 import type { DeployPayload } from "../backend/payload.js";
+import { DEFAULT_AGENT_SETTINGS, type AgentSettings } from "../registry/profiles.js";
 import { RecordClient } from "../nostr/record-client.js";
 import { createEventBuilder } from "../nostr/event-builder.js";
 import { CONFIG_SLUG, AUTH_SLUG } from "../nostr/config-records.js";
@@ -43,66 +44,46 @@ function effectiveEnv(payload: DeployPayload): Record<string, string> {
   return { ...payload.envVars };
 }
 
-function numberOf(value: string | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
-}
-
-function listOf(value: string | undefined): string[] | undefined {
-  if (value === undefined) return undefined;
-  const items = value
-    .split(",")
-    .map((item) => item.trim())
-    .filter((item) => item !== "");
-  return items.length > 0 ? items : undefined;
-}
-
 /**
- * Derives the core-record config from the payload (`launch.env` never reaches
- * the Pod — this projection is how the desktop's effective config travels).
+ * Derives the core-record config from the deploy profile's agent settings.
+ * The registry profile is the *sole source*: whatever the Desktop payload or
+ * its launch env carries for these fields (model, system prompt, respond
+ * gate, tools, scheduler, extensions) is deliberately ignored — the GUI's
+ * remaining surface is picking the profile, and one source cannot drift.
  */
 export function buildCoreConfig(
-  payload: DeployPayload,
+  settings: AgentSettings,
   inactivitySeconds: number,
-  profileExtensions: string[] = [],
+  extensions: string[] = [],
 ): CoreConfigV1 {
-  const env = effectiveEnv(payload);
   const config: CoreConfigV1 = { v: 1 };
 
-  const model = env["AUTOGENT_MODEL"] ?? env["BUZZ_ACP_MODEL"] ?? payload.model ?? undefined;
-  if (model) config.model = model;
-  const thinking = env["AUTOGENT_THINKING"];
-  if (thinking) config.thinking = thinking;
-  const systemPrompt = payload.systemPrompt ?? env["AUTOGENT_SYSTEM_PROMPT"] ?? undefined;
-  if (systemPrompt) config.system_prompt = systemPrompt;
+  if (settings.model !== null) config.model = settings.model;
+  if (settings.thinking !== null) config.thinking = settings.thinking;
+  if (settings.systemPrompt !== null) config.system_prompt = settings.systemPrompt;
 
-  config.respond_to = payload.respondTo;
-  if (payload.respondToAllowlist.length > 0) {
-    config.respond_to_allowlist = payload.respondToAllowlist;
+  config.respond_to = settings.respondTo;
+  if (settings.respondToAllowlist.length > 0) {
+    config.respond_to_allowlist = settings.respondToAllowlist;
   }
 
-  const include = listOf(env["AUTOGENT_TOOLS"]);
-  const exclude = listOf(env["AUTOGENT_EXCLUDE_TOOLS"]);
-  if (include || exclude) {
-    config.tools = { ...(include ? { include } : {}), ...(exclude ? { exclude } : {}) };
+  if (settings.toolsInclude.length > 0 || settings.toolsExclude.length > 0) {
+    config.tools = {
+      ...(settings.toolsInclude.length > 0 ? { include: settings.toolsInclude } : {}),
+      ...(settings.toolsExclude.length > 0 ? { exclude: settings.toolsExclude } : {}),
+    };
   }
 
-  // Per-agent env from the Desktop wins over the registry profile, mirroring
-  // the model/tools tiers above.
-  const extensions =
-    listOf(env["AUTOGENT_EXTENSIONS"]) ??
-    (profileExtensions.length > 0 ? profileExtensions : undefined);
-  if (extensions) config.extensions = extensions;
+  if (extensions.length > 0) config.extensions = extensions;
 
-  const maxConcurrent = numberOf(env["AUTOGENT_MAX_CONCURRENT_TURNS"] ?? env["BUZZ_ACP_AGENTS"]);
-  const contextLimit = numberOf(env["AUTOGENT_CONTEXT_MESSAGE_LIMIT"]);
-  if (maxConcurrent !== undefined || contextLimit !== undefined) {
+  if (settings.maxConcurrentTurns !== null || settings.contextMessageLimit !== null) {
     config.scheduler = {
-      ...(maxConcurrent !== undefined && maxConcurrent >= 1
-        ? { max_concurrent_turns: Math.floor(maxConcurrent) }
+      ...(settings.maxConcurrentTurns !== null
+        ? { max_concurrent_turns: settings.maxConcurrentTurns }
         : {}),
-      ...(contextLimit !== undefined ? { context_message_limit: Math.floor(contextLimit) } : {}),
+      ...(settings.contextMessageLimit !== null
+        ? { context_message_limit: settings.contextMessageLimit }
+        : {}),
     };
   }
 
@@ -126,8 +107,10 @@ export function buildPodEnv(payload: DeployPayload): Record<string, string> {
 
 export interface PublishRecordsInput {
   payload: DeployPayload;
+  /** Agent settings from the deploy profile — the sole source for the record. */
+  settings?: AgentSettings;
   inactivitySeconds: number;
-  /** From the deploy profile; overridden by `AUTOGENT_EXTENSIONS` in the payload env. */
+  /** Pi extension sources from the deploy profile. */
   extensions?: string[];
   /** Raw auth.json bytes from the owner-side store. */
   providerAuthJson: string;
@@ -156,7 +139,11 @@ export async function publishDeployRecords(input: PublishRecordsInput): Promise<
     await relay.connect();
     const records = new RecordClient({ relay, signer, clock: systemClock });
 
-    const core = buildCoreConfig(payload, input.inactivitySeconds, input.extensions ?? []);
+    const core = buildCoreConfig(
+      input.settings ?? DEFAULT_AGENT_SETTINGS,
+      input.inactivitySeconds,
+      input.extensions ?? [],
+    );
     await records.publish(CONFIG_SLUG, { slug: CONFIG_SLUG, value: core });
     await records.publish(AUTH_SLUG, {
       slug: AUTH_SLUG,

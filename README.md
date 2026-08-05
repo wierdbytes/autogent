@@ -161,7 +161,7 @@ resolved configuration.
 | `AUTOGENT_MODEL` | pi's default | e.g. `anthropic/claude-sonnet-4-5` |
 | `AUTOGENT_THINKING` | pi's default | Thinking level |
 | `AUTOGENT_TOOLS` / `AUTOGENT_EXCLUDE_TOOLS` | — | Tool allow/deny lists |
-| `AUTOGENT_EXTENSIONS` | — | Comma-separated pi extension sources (paths or `npm:`/`git:`). On k8s deploys the list comes from the deploy profile (interactive `autogent` CLI) via the config record (`autogent/config`); this env var overrides it |
+| `AUTOGENT_EXTENSIONS` | — | Comma-separated pi extension sources (paths or `npm:`/`git:`). On k8s deploys the list comes from the deploy profile (interactive `autogent` CLI) via the config record (`autogent/config`) |
 | `AUTOGENT_READ_ROOTS` / `AUTOGENT_WRITE_ROOTS` | cwd | Filesystem sandbox roots |
 | `AUTOGENT_COMMAND_DENYLIST` | — | Refused bash substrings |
 | `AUTOGENT_MAX_CONCURRENT_TURNS` | `4` | Channels running a turn at once |
@@ -331,12 +331,18 @@ The shape of it:
 - **Agents are configured in the `autogent` CLI, not the GUI.** The interactive
   `autogent` command owns the registry of *deploy profiles*: a wizard collects
   every substrate parameter (kube context picked from the ambient kubeconfig,
-  namespace, image, storage, idle timeout — Enter accepts the default) and runs
-  the mandatory pi/Anthropic OAuth login. Buzz Desktop's provider form is
-  reduced to a single `agent` field — a drop-down over the registry. The Nostr
-  identity is still minted by Buzz Desktop when the agent record is added; it
-  is bound to the profile on first deploy, which also adopts the profile's
-  OAuth credential under the one-account-one-agent rule.
+  namespace, image, storage, idle timeout — Enter accepts the default), runs
+  the mandatory pi provider login (OAuth or API key), and then collects the
+  agent settings — model and reasoning effort (offered **only** for providers
+  whose login is stored in the profile, since those are the only credentials
+  the Pod will hold), system prompt, respond-to gate + allowlist, tool
+  allow/deny lists and scheduler ceilings. The profile is the *sole source*
+  for these at deploy: whatever the Desktop payload carries for them is
+  ignored. Buzz Desktop's provider form is reduced to a single `agent` field —
+  a drop-down over the registry. The Nostr identity is still minted by Buzz
+  Desktop when the agent record is added; it is bound to the profile on first
+  deploy, which also adopts the profile's OAuth credential under the
+  one-account-one-agent rule.
 - **Credentials** are captured by the wizard's login step (pi's OAuth flow) and
   published as the provider-auth record at deploy. `autogent-nostr auth login
   --agent <pubkey>` remains the per-identity escape hatch. The agent writes

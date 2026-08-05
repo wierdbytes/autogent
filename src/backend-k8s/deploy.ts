@@ -15,7 +15,7 @@
 import type { DeployPayload } from "../backend/payload.js";
 import { fail } from "../backend/wire.js";
 import { readAgentAuth } from "../owner-auth/store.js";
-import { adoptProfileCredential } from "../registry/profiles.js";
+import { adoptProfileCredential, type DeployProfile } from "../registry/profiles.js";
 import type { K8sProviderConfig } from "./config.js";
 import { buildPodEnv, publishDeployRecords } from "./records.js";
 import { apply, deleteAndWait, getJson, listJson, type KubectlOptions } from "./kubectl.js";
@@ -39,10 +39,11 @@ export interface K8sDeployInput {
   /** The original bech32/hex nsec, for the Secret. */
   nsec: string;
   /**
-   * Deploy-profile name, when the deploy came through the registry: its
-   * wizard-captured OAuth credential is adopted for the agent on first deploy.
+   * The registry deploy profile, when the deploy came through it: its
+   * wizard-captured OAuth credential is adopted for the agent on first
+   * deploy, and its agent settings are the sole source for the config record.
    */
-  profileName?: string;
+  profile?: DeployProfile;
   /** Injected in tests. */
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -63,12 +64,13 @@ export async function deployToK8s(input: K8sDeployInput): Promise<K8sDeployOutco
   //    its model provider is refused before any object exists (plan §4.3.3).
   //    First deploy of a registry profile adopts the credential its wizard
   //    login captured, binding it to the pubkey the payload just revealed.
+  const profileName = input.profile?.name;
   let providerAuthJson = await readAgentAuth(payload.agentPubkey);
-  if (providerAuthJson === null && input.profileName !== undefined) {
-    const adoption = await adoptProfileCredential(input.profileName, payload.agentPubkey);
+  if (providerAuthJson === null && profileName !== undefined) {
+    const adoption = await adoptProfileCredential(profileName, payload.agentPubkey);
     if (adoption.state === "conflict") {
       fail(
-        `the OAuth account of profile '${input.profileName}' is already bound to agent ` +
+        `the OAuth account of profile '${profileName}' is already bound to agent ` +
           `${adoption.conflict.agentPubkey.slice(0, 12)}… — one account drives exactly one ` +
           "agent; re-run the login step in the `autogent` CLI with a different account",
       );
@@ -78,15 +80,18 @@ export async function deployToK8s(input: K8sDeployInput): Promise<K8sDeployOutco
   if (providerAuthJson === null) {
     fail(
       `no provider credentials for agent ${payload.agentPubkey.slice(0, 12)}… — ` +
-        (input.profileName !== undefined
-          ? `profile '${input.profileName}' has no stored login; re-run the login step in the interactive \`autogent\` CLI`
+        (profileName !== undefined
+          ? `profile '${profileName}' has no stored login; re-run the login step in the interactive \`autogent\` CLI`
           : `run 'autogent-nostr auth login --agent ${payload.agentPubkey}' on this machine first`),
     );
   }
 
-  // 2. Records before substrate: the Pod reads them at first start.
+  // 2. Records before substrate: the Pod reads them at first start. The
+  //    profile's agent settings are the record's sole source (payload env
+  //    and payload model/prompt fields are ignored by design).
   await publishDeployRecords({
     payload,
+    ...(input.profile ? { settings: input.profile } : {}),
     inactivitySeconds: config.inactivitySeconds,
     extensions: config.extensions,
     providerAuthJson,

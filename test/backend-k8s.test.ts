@@ -11,6 +11,7 @@ import { parseDeployPayload } from "../src/backend/payload.js";
 import { ProviderError } from "../src/backend/wire.js";
 import { k8sConfigSchema, parseK8sProviderConfig } from "../src/backend-k8s/config.js";
 import { buildCoreConfig, buildPodEnv } from "../src/backend-k8s/records.js";
+import { DEFAULT_AGENT_SETTINGS, type AgentSettings } from "../src/registry/profiles.js";
 import { deployToK8s, podVerdict } from "../src/backend-k8s/deploy.js";
 import { handleRequest } from "../src/backend-k8s/main.js";
 import { podObject, pvcObject, secretObject, type AgentObjectsInput } from "../src/backend-k8s/manifests.js";
@@ -161,62 +162,49 @@ describe("manifests", () => {
   });
 });
 
-describe("core-record derivation from the payload", () => {
-  it("projects model, prompt, gate and ceilings into the config", () => {
-    const minted = mintAgent({
-      model: "anthropic/claude-sonnet-4-5",
-      system_prompt: "be helpful",
-      respond_to: "allowlist",
-      respond_to_allowlist: ["a".repeat(64)],
-    });
-    const payload = parseDeployPayload(minted.agent);
-    const core = buildCoreConfig(payload, 3600);
-    expect(core).toMatchObject({
+describe("core-record derivation from the profile", () => {
+  const settings = (overrides: Partial<AgentSettings> = {}): AgentSettings => ({
+    ...DEFAULT_AGENT_SETTINGS,
+    ...overrides,
+  });
+
+  it("projects model, effort, prompt, gate and ceilings into the config", () => {
+    const core = buildCoreConfig(
+      settings({
+        model: "anthropic/claude-sonnet-4-5",
+        thinking: "high",
+        systemPrompt: "be helpful",
+        respondTo: "allowlist",
+        respondToAllowlist: ["a".repeat(64)],
+        toolsInclude: ["read", "bash"],
+        toolsExclude: ["write"],
+        maxConcurrentTurns: 2,
+        contextMessageLimit: 6,
+      }),
+      3600,
+    );
+    expect(core).toEqual({
       v: 1,
       model: "anthropic/claude-sonnet-4-5",
+      thinking: "high",
       system_prompt: "be helpful",
       respond_to: "allowlist",
       respond_to_allowlist: ["a".repeat(64)],
+      tools: { include: ["read", "bash"], exclude: ["write"] },
+      scheduler: { max_concurrent_turns: 2, context_message_limit: 6 },
       inactivity_exit_sec: 3600,
     });
   });
 
-  it("lets launch.env override, translating buzz-acp policy keys", () => {
-    const minted = mintAgent({ model: "anthropic/base" });
-    const launch = minted.agent["launch"] as Record<string, unknown>;
-    launch["policy_env"] = { BUZZ_ACP_MODEL: "anthropic/policy", BUZZ_ACP_AGENTS: "2" };
-    launch["env"] = {
-      AUTOGENT_THINKING: "high",
-      AUTOGENT_CONTEXT_MESSAGE_LIMIT: "6",
-      AUTOGENT_EXTENSIONS: "npm:@wierdbytes/pi-anthropic, npm:@acme/pi-extra",
-    };
-    const payload = parseDeployPayload(minted.agent);
-    const core = buildCoreConfig(payload, 0);
-    expect(core.model).toBe("anthropic/policy");
-    expect(core.thinking).toBe("high");
-    expect(core.extensions).toEqual(["npm:@wierdbytes/pi-anthropic", "npm:@acme/pi-extra"]);
-    expect(core.scheduler).toEqual({ max_concurrent_turns: 2, context_message_limit: 6 });
-    expect(core.inactivity_exit_sec).toBe(0);
+  it("emits only defaults when the profile keeps pi defaults", () => {
+    const core = buildCoreConfig(settings(), 0);
+    expect(core).toEqual({ v: 1, respond_to: "owner-only", inactivity_exit_sec: 0 });
   });
 
-  it("takes extensions from the profile, letting payload env override", () => {
-    const minted = mintAgent();
-    const payload = parseDeployPayload(minted.agent);
-
-    const fromProfile = buildCoreConfig(payload, 0, ["npm:@wierdbytes/pi-anthropic"]);
+  it("takes extensions from the profile", () => {
+    const fromProfile = buildCoreConfig(settings(), 0, ["npm:@wierdbytes/pi-anthropic"]);
     expect(fromProfile.extensions).toEqual(["npm:@wierdbytes/pi-anthropic"]);
-
-    const silent = buildCoreConfig(payload, 0);
-    expect(silent.extensions).toBeUndefined();
-
-    const envMinted = mintAgent();
-    (envMinted.agent["launch"] as Record<string, unknown>)["env"] = {
-      AUTOGENT_EXTENSIONS: "npm:@acme/override",
-    };
-    const overridden = buildCoreConfig(parseDeployPayload(envMinted.agent), 0, [
-      "npm:@wierdbytes/pi-anthropic",
-    ]);
-    expect(overridden.extensions).toEqual(["npm:@acme/override"]);
+    expect(buildCoreConfig(settings(), 0).extensions).toBeUndefined();
   });
 
   it("passes only the non-secret allowlist into the Pod env", () => {
