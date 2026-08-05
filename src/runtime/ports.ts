@@ -273,11 +273,25 @@ export type ObserverFrameDraft = Omit<ObserverEvent, "seq" | "timestamp" | "agen
   agentIndex?: number | null;
 };
 
+/** Routing identity of one turn's telemetry stream. */
+export interface TelemetryTurnRoute {
+  channelId: string | null;
+  sessionId: string | null;
+  turnId: string;
+  startedAt?: string | null;
+}
+
 export interface TelemetryPort {
   /** Enqueues a frame. Never throws and never blocks the caller. */
   emit(frame: ObserverFrameDraft): void;
   /** Flushes coalesced frames. Used at turn boundaries and on shutdown. */
   flush(): Promise<void>;
+  /**
+   * Starts the turn-liveness heartbeat that keeps Desktop's working indicator
+   * alive through long, quiet tool calls. Returns the stop function, which the
+   * caller must invoke exactly once when the turn settles.
+   */
+  trackTurn(route: TelemetryTurnRoute): () => void;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -296,6 +310,8 @@ export interface AgentSessionHandle {
   readonly isStreaming: boolean;
   readonly isIdle: boolean;
   readonly model: string | undefined;
+  /** Context window of the active model, in tokens, when the SDK reports it. */
+  readonly contextWindow: number | undefined;
   prompt(text: string): Promise<void>;
   steer(text: string): Promise<void>;
   abort(): Promise<void>;

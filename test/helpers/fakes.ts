@@ -12,6 +12,7 @@ import type {
   PiEvent,
   StatePort,
   TelemetryPort,
+  TelemetryTurnRoute,
 } from "../../src/runtime/ports.js";
 
 export const AGENT_SECRET = new Uint8Array(32).fill(11);
@@ -196,10 +197,18 @@ export function fakeState(): FakeState {
 
 export class FakeTelemetry implements TelemetryPort {
   readonly frames: ObserverFrameDraft[] = [];
+  readonly trackedTurns: Array<{ turnId: string; stopped: number }> = [];
   emit(frame: ObserverFrameDraft): void {
     this.frames.push(frame);
   }
   async flush(): Promise<void> {}
+  trackTurn(route: TelemetryTurnRoute): () => void {
+    const entry = { turnId: route.turnId, stopped: 0 };
+    this.trackedTurns.push(entry);
+    return () => {
+      entry.stopped += 1;
+    };
+  }
   ofKind(kind: string): ObserverFrameDraft[] {
     return this.frames.filter((frame) => frame.kind === kind);
   }
@@ -216,6 +225,7 @@ export class FakeSession implements AgentSessionHandle {
   readonly sessionId: string;
   readonly sessionFile = undefined;
   model: string | undefined = "test/model";
+  contextWindow: number | undefined = 200_000;
   isStreaming = false;
   isIdle = true;
   readonly prompts: string[] = [];

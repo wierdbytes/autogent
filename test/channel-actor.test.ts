@@ -402,6 +402,112 @@ describe("telemetry shape", () => {
     await actor.drain();
     expect(telemetry.ofKind("turn_completed")).toHaveLength(1);
   });
+
+  it("streams thinking, tool activity and assistant text as Desktop session updates", async () => {
+    const { actor, session, telemetry } = setup();
+    actor.submit({ event: chatEvent({ channelId: CHANNEL, content: "go" }), promptTag: "@mention" });
+    await actor.drain();
+
+    session.emit({ type: "thinking_delta", messageId: "m1", delta: "pondering" });
+    session.emit({ type: "text_delta", messageId: "m1", delta: "partial" });
+    session.emit({ type: "tool_start", toolCallId: "t1", toolName: "bash", input: { cmd: "ls" } });
+    session.emit({ type: "tool_end", toolCallId: "t1", isError: false, output: "done" });
+    await actor.drain();
+
+    const updates = telemetry
+      .ofKind("acp_read")
+      .map((frame) => frame.payload as { method?: string; params?: { update?: Record<string, unknown> } })
+      .filter((payload) => payload.method === "session/update")
+      .map((payload) => payload.params?.update ?? {});
+
+    expect(updates.map((update) => update.sessionUpdate)).toEqual([
+      "agent_thought_chunk",
+      "agent_message_chunk",
+      "tool_call",
+      "tool_call_update",
+    ]);
+    expect(updates[0]).toMatchObject({ messageId: "m1", content: "pondering" });
+    expect(updates[1]).toMatchObject({ messageId: "m1", content: "partial" });
+    expect(updates[2]).toMatchObject({
+      toolCallId: "t1",
+      toolName: "bash",
+      status: "executing",
+      args: { cmd: "ls" },
+    });
+    expect(updates[3]).toMatchObject({ toolCallId: "t1", status: "completed", content: "done" });
+
+    // Every streamed frame carries the turn's routing identity.
+    for (const frame of telemetry.ofKind("acp_read")) {
+      expect(frame.channelId).toBe(CHANNEL);
+      expect(frame.turnId).toBe(actor.activeTurn?.turnId);
+      expect(frame.sessionId).toBe(session.sessionId);
+    }
+  });
+
+  it("emits a usage_update frame when the provider reports usage and the window is known", async () => {
+    const { actor, session, telemetry } = setup();
+    session.contextWindow = 100_000;
+    actor.submit({ event: chatEvent({ channelId: CHANNEL, content: "go" }), promptTag: "@mention" });
+    await actor.drain();
+
+    session.emit({
+      type: "message_end",
+      messageId: "m1",
+      role: "assistant",
+      text: "answer",
+      usage: { input: 900, output: 100, total: 1_000, cacheRead: null, cacheWrite: null, costUsd: 0.01 },
+    });
+    await actor.drain();
+
+    const usageUpdates = telemetry
+      .ofKind("acp_read")
+      .map((frame) => frame.payload as { params?: { update?: Record<string, unknown> } })
+      .map((payload) => payload.params?.update)
+      .filter((update) => update?.sessionUpdate === "usage_update");
+    expect(usageUpdates).toEqual([
+      {
+        sessionUpdate: "usage_update",
+        used: 1_000,
+        size: 100_000,
+        cost: { amount: 0.01, currency: "USD" },
+      },
+    ]);
+  });
+
+  it("omits the usage_update frame when the context window is unknown", async () => {
+    const { actor, session, telemetry } = setup();
+    session.contextWindow = undefined;
+    actor.submit({ event: chatEvent({ channelId: CHANNEL, content: "go" }), promptTag: "@mention" });
+    await actor.drain();
+
+    session.emit({
+      type: "message_end",
+      messageId: "m1",
+      role: "assistant",
+      text: "answer",
+      usage: { input: 900, output: 100, total: 1_000, cacheRead: null, cacheWrite: null, costUsd: null },
+    });
+    await actor.drain();
+
+    const usageUpdates = telemetry
+      .ofKind("acp_read")
+      .map((frame) => frame.payload as { params?: { update?: Record<string, unknown> } })
+      .filter((payload) => payload.params?.update?.sessionUpdate === "usage_update");
+    expect(usageUpdates).toHaveLength(0);
+  });
+
+  it("tracks turn liveness for exactly the lifetime of the turn", async () => {
+    const { actor, session, telemetry } = setup();
+    actor.submit({ event: chatEvent({ channelId: CHANNEL, content: "go" }), promptTag: "@mention" });
+    await actor.drain();
+
+    const turnId = actor.activeTurn?.turnId;
+    expect(telemetry.trackedTurns).toEqual([{ turnId, stopped: 0 }]);
+
+    session.emit({ type: "agent_settled" });
+    await actor.drain();
+    expect(telemetry.trackedTurns).toEqual([{ turnId, stopped: 1 }]);
+  });
 });
 
 describe("agent identity", () => {

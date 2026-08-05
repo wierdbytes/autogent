@@ -22,6 +22,12 @@ import type {
   TelemetryPort,
 } from "./ports.js";
 import type { OutputRouter } from "./output-router.js";
+import {
+  frameDraft,
+  mapPiEvent,
+  usageUpdateFrame,
+  type TelemetryFrameBody,
+} from "../telemetry/buzz-desktop-compat.js";
 import type { ChannelType, ConversationContext, PromptChannelInfo } from "./prompt-formatter.js";
 import { formatPrimaryPrompt, formatSteeringPrompt } from "./prompt-formatter.js";
 import { canonicalThreadRoot, conversationKey, type ConversationKey } from "./conversation-key.js";
@@ -78,6 +84,8 @@ interface ActiveTurn {
   conversation: ConversationKey;
   lastActivityMs: number;
   cancelIdleWatch: () => void;
+  /** Stops the telemetry liveness heartbeat and flushes the turn's chunks. */
+  stopLiveness: () => void;
   releaseConcurrency: () => void;
 }
 
@@ -258,6 +266,12 @@ export class ChannelActor {
       conversation: conversationKey(this.deps.relayId, this.deps.channelId, threadRootId),
       lastActivityMs: startedAtMs,
       cancelIdleWatch: this.#watchIdle(),
+      stopLiveness: this.deps.telemetry.trackTurn({
+        channelId: this.deps.channelId,
+        sessionId: session.sessionId,
+        turnId,
+        startedAt: new Date(startedAtMs).toISOString(),
+      }),
       releaseConcurrency,
     };
     this.#state = "running";
@@ -368,6 +382,20 @@ export class ChannelActor {
     const turn = this.#turn;
     if (turn) turn.lastActivityMs = this.deps.clock.now();
 
+    // The owner-facing transcript: thinking, tool calls and streaming text are
+    // serialised into Desktop-compatible frames here — and only here — so they
+    // can never reach the channel, only the encrypted observer stream.
+    if (turn) {
+      const route = {
+        channelId: this.deps.channelId,
+        sessionId: this.#session?.sessionId ?? null,
+        turnId: turn.context.turnId,
+      };
+      for (const body of mapPiEvent(event)) {
+        this.deps.telemetry.emit(frameDraft(body, route));
+      }
+    }
+
     switch (event.type) {
       case "message_end": {
         if (!turn || event.role !== "assistant") break;
@@ -376,6 +404,16 @@ export class ChannelActor {
         this.deps.output.record(turn.context, event.messageId, event.text);
         if (event.usage && this.#session) {
           this.deps.observeUsage(this.#session.sessionId, turn.context.turnId, event.usage);
+          const usageFrame = usageFrameFor(event.usage, this.#session.contextWindow);
+          if (usageFrame) {
+            this.deps.telemetry.emit(
+              frameDraft(usageFrame, {
+                channelId: this.deps.channelId,
+                sessionId: this.#session.sessionId,
+                turnId: turn.context.turnId,
+              }),
+            );
+          }
         }
         break;
       }
@@ -410,6 +448,9 @@ export class ChannelActor {
     }
 
     turn.cancelIdleWatch();
+    // Stopped before the terminal frame goes out: stopping also flushes the
+    // turn's coalesced chunks, so `turn_completed` cannot overtake them.
+    turn.stopLiveness();
     turn.releaseConcurrency();
 
     this.deps.state.transaction(() => {
@@ -537,4 +578,33 @@ export class ChannelActor {
     }, Math.max(1_000, Math.floor(this.deps.idleTimeoutMs / 4)));
     return cancel;
   }
+}
+
+/**
+ * Builds the transcript's `usage_update` frame for one completed model call.
+ *
+ * Desktop renders the usage line only when both counters are numbers, so the
+ * frame is omitted — not zero-filled — when the provider reported no totals or
+ * the SDK does not expose the model's context window.
+ */
+function usageFrameFor(
+  usage: PiUsage,
+  contextWindow: number | undefined,
+): TelemetryFrameBody | null {
+  const used = usage.total ?? sumUsageCounters(usage);
+  if (used === null || contextWindow === undefined) return null;
+  return usageUpdateFrame({
+    used,
+    size: contextWindow,
+    ...(usage.costUsd === null ? {} : { costUsd: usage.costUsd }),
+  });
+}
+
+/** Context consumption when the provider omits `total`: the sum of known parts. */
+function sumUsageCounters(usage: PiUsage): number | null {
+  const parts = [usage.input, usage.output, usage.cacheRead, usage.cacheWrite].filter(
+    (value): value is number => value !== null,
+  );
+  if (parts.length === 0) return null;
+  return parts.reduce((left, right) => left + right, 0);
 }

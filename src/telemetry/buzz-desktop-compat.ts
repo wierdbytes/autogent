@@ -171,7 +171,10 @@ export interface UsageUpdateFrameArgs {
   /** Context tokens consumed. Desktop renders nothing unless both are numbers. */
   used: number;
   size: number;
-  costUsd: number;
+  /** Omitted (not zeroed) when the provider reported no cost: Desktop only
+   * appends the cost suffix when `cost.amount` is a number, so a fabricated
+   * `$0.0000` would read as a claim rather than an absence. */
+  costUsd?: number;
 }
 
 export function usageUpdateFrame(args: UsageUpdateFrameArgs): TelemetryFrameBody {
@@ -181,7 +184,9 @@ export function usageUpdateFrame(args: UsageUpdateFrameArgs): TelemetryFrameBody
       sessionUpdate: "usage_update",
       used: args.used,
       size: args.size,
-      cost: { amount: args.costUsd, currency: "USD" },
+      ...(args.costUsd === undefined
+        ? {}
+        : { cost: { amount: args.costUsd, currency: "USD" } }),
     }),
   };
 }

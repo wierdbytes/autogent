@@ -27,7 +27,7 @@ interface SdkSession {
   sessionFile: string | undefined;
   isStreaming: boolean;
   isIdle: boolean;
-  model: { id?: string; provider?: string } | undefined;
+  model: { id?: string; provider?: string; contextWindow?: number } | undefined;
   prompt(text: string, options?: Record<string, unknown>): Promise<void>;
   steer(text: string): Promise<void>;
   abort(): Promise<void>;
@@ -84,6 +84,12 @@ class PiSessionAdapter implements AgentSessionHandle {
     const model = this.session.model;
     if (!model?.id) return undefined;
     return model.provider ? `${model.provider}/${model.id}` : model.id;
+  }
+  get contextWindow(): number | undefined {
+    const window = this.session.model?.contextWindow;
+    return typeof window === "number" && Number.isFinite(window) && window > 0
+      ? window
+      : undefined;
   }
 
   prompt(text: string): Promise<void> {
