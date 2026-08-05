@@ -1,16 +1,16 @@
 /**
  * Provider-credential materialisation and write-back (remote plan §3.2).
  *
- * The `mem/provider-auth` engram carries the byte content of a pi-compatible
+ * The `mem/provider-auth` config record carries the byte content of a pi-compatible
  * `auth.json` (a `Record<providerId, Credential>`; multi-provider by
  * construction, resolving open question О-4). At boot the head is materialised
  * into `<stateDir>/pi-agent/auth.json` and the agent's Pi sessions are pointed
  * at that directory. When the pi SDK refreshes an OAuth token it rewrites the
- * file; a watcher picks the change up and republishes the engram so a Pod
+ * file; a watcher picks the change up and republishes the record so a Pod
  * recreated with an empty PVC recovers the fresh token from the relay
  * (acceptance criterion 3; watcher answers open question О-3).
  *
- * Merge rule (the only one): the newer side wins by timestamp — the engram
+ * Merge rule (the only one): the newer side wins by timestamp — the record
  * head's `created_at` versus the local file's recorded sync watermark — and
  * the agent immediately publishes the missing side.
  */
@@ -25,8 +25,8 @@ import { nullLogger } from "./logger.js";
 /** Directory handed to the pi SDK as `agentDir`. Lives inside the sealed state dir. */
 export const PI_AGENT_DIR_NAME = "pi-agent";
 export const AUTH_FILE_NAME = "auth.json";
-/** Sidecar recording which engram head the local file corresponds to. */
-const SYNC_META_FILE_NAME = "auth.engram-sync.json";
+/** Sidecar recording which record head the local file corresponds to. */
+const SYNC_META_FILE_NAME = "auth.record-sync.json";
 
 export function piAgentDir(stateDir: string): string {
   return join(stateDir, PI_AGENT_DIR_NAME);
@@ -62,8 +62,8 @@ export function digestOf(content: string): string {
 }
 
 interface SyncMeta {
-  /** `created_at` of the engram head the local file was last synced with. */
-  engramCreatedAt: number;
+  /** `created_at` of the record head the local file was last synced with. */
+  recordCreatedAt: number;
   /** SHA-256 of the synced content, to tell our own writes from pi's. */
   digest: string;
 }
@@ -73,8 +73,8 @@ async function readSyncMeta(stateDir: string): Promise<SyncMeta | null> {
     const raw = JSON.parse(await readFile(syncMetaPath(stateDir), "utf8")) as unknown;
     if (typeof raw !== "object" || raw === null) return null;
     const meta = raw as Record<string, unknown>;
-    if (typeof meta["engramCreatedAt"] !== "number" || typeof meta["digest"] !== "string") return null;
-    return { engramCreatedAt: meta["engramCreatedAt"], digest: meta["digest"] };
+    if (typeof meta["recordCreatedAt"] !== "number" || typeof meta["digest"] !== "string") return null;
+    return { recordCreatedAt: meta["recordCreatedAt"], digest: meta["digest"] };
   } catch {
     return null;
   }
@@ -92,41 +92,41 @@ export async function readLocalAuth(stateDir: string): Promise<string | null> {
   }
 }
 
-/** Writes `auth.json` (0600) and records the engram watermark it came from. */
+/** Writes `auth.json` (0600) and records the record-head watermark it came from. */
 export async function materializeAuth(
   stateDir: string,
   content: string,
-  engramCreatedAt: number,
+  recordCreatedAt: number,
 ): Promise<string> {
   const dir = piAgentDir(stateDir);
   await mkdir(dir, { recursive: true, mode: 0o700 });
   await chmod(dir, 0o700);
   const path = authFilePath(stateDir);
   await writeFileAtomic(path, content, 0o600);
-  await writeSyncMeta(stateDir, { engramCreatedAt, digest: digestOf(content) });
+  await writeSyncMeta(stateDir, { recordCreatedAt, digest: digestOf(content) });
   return path;
 }
 
-/** Records that the current local content is now represented by an engram head. */
+/** Records that the current local content is now represented by a record head. */
 export async function recordAuthSynced(
   stateDir: string,
   content: string,
-  engramCreatedAt: number,
+  recordCreatedAt: number,
 ): Promise<void> {
   await mkdir(piAgentDir(stateDir), { recursive: true, mode: 0o700 });
-  await writeSyncMeta(stateDir, { engramCreatedAt, digest: digestOf(content) });
+  await writeSyncMeta(stateDir, { recordCreatedAt, digest: digestOf(content) });
 }
 
 export type AuthReconcileResult =
   /** Local file is current; nothing to publish. */
   | { action: "none"; authPath: string }
-  /** Engram head written to disk. */
+  /** Record head written to disk. */
   | { action: "materialized"; authPath: string }
   /** Local file is newer than the head — caller must publish it. */
   | { action: "publish-local"; authPath: string; content: string }
   /** No credentials anywhere — degraded, fail-closed. */
   | { action: "missing" }
-  /** Owner tombstoned the engram — degraded, fail-closed. */
+  /** Owner tombstoned the record — degraded, fail-closed. */
   | { action: "revoked" };
 
 export interface AuthHeadView {
@@ -136,7 +136,7 @@ export interface AuthHeadView {
 }
 
 /**
- * Reconciles the engram head with the local file at boot.
+ * Reconciles the record head with the local file at boot.
  *
  * Freshness of the local file is its mtime (seconds) when it diverges from the
  * recorded sync watermark — i.e. pi refreshed the token and we crashed before
@@ -168,7 +168,7 @@ export async function reconcileProviderAuth(
   const localDigest = digestOf(local);
   if (meta && meta.digest === localDigest) {
     // Local is exactly what we last synced. The head decides.
-    if (head.createdAt > meta.engramCreatedAt) {
+    if (head.createdAt > meta.recordCreatedAt) {
       await materializeAuth(stateDir, head.content, head.createdAt);
       return { action: "materialized", authPath: path };
     }
@@ -183,7 +183,7 @@ export async function reconcileProviderAuth(
     // Race: the file vanished between read and stat. Treat the head as newer.
   }
   if (localMtimeSec > head.createdAt) {
-    logger.info("local auth.json is newer than the engram head; publishing write-back");
+    logger.info("local auth.json is newer than the record head; publishing write-back");
     return { action: "publish-local", authPath: path, content: local };
   }
   await materializeAuth(stateDir, head.content, head.createdAt);

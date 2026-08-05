@@ -40,7 +40,7 @@ export class InactivityMonitor {
     this.#logger = options.logger ?? nullLogger;
   }
 
-  /** (Re)arms with a new ceiling. 0 disarms. Hot-updatable from the core engram. */
+  /** (Re)arms with a new ceiling. 0 disarms. Hot-updatable from the core record. */
   arm(inactivitySec: number): void {
     if (this.#stopped || this.#expired) return;
     this.#limitMs = Math.max(0, inactivitySec) * 1000;

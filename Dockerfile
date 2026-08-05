@@ -38,11 +38,12 @@ USER agent
 # /data is the PVC: sealed state (identity, SQLite, pi auth.json) and the
 # workspace the model's tools operate in. The bootstrap triple (AUTOGENT_NSEC,
 # AUTOGENT_RELAY_URL, AUTOGENT_AUTH_TAG) arrives via the k8s Secret; the rest
-# of the configuration arrives as the core engram over the relay (§3.3).
+# of the configuration arrives as the core config record (kind 30078) over the
+# relay (§3.3).
 ENV NODE_ENV=production \
     AUTOGENT_STATE_DIR=/data/state \
     AUTOGENT_CWD=/data/workspace \
-    AUTOGENT_ENGRAM_CONFIG=1
+    AUTOGENT_REMOTE_CONFIG=1
 
 ENTRYPOINT ["/usr/bin/tini", "--", "node", "dist/cli.js"]
 CMD ["run"]

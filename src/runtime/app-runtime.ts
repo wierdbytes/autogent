@@ -9,14 +9,14 @@
 
 import { randomUUID } from "node:crypto";
 import type { AgentConfig } from "../config.js";
-import type { EngramClient } from "../nostr/engram-client.js";
+import type { RecordClient } from "../nostr/record-client.js";
 import {
   CORE_SLUG,
   isCoreBody,
   PROVIDER_AUTH_SLUG,
-  type EngramHead,
+  type RecordHead,
   type MemoryBody,
-} from "../nostr/nip-ae.js";
+} from "../nostr/config-records.js";
 import {
   digestOf,
   materializeAuth,
@@ -88,16 +88,16 @@ const PRE_LIVE_PHASES: ReadonlySet<RuntimePhase> = new Set<RuntimePhase>([
 export const SHUTDOWN_FINALIZE_RESERVE_MS = 7_000;
 
 /**
- * Remote (engram-configured) mode, prepared by `main.ts` (remote plan §3).
+ * Remote (record-configured) mode, prepared by `main.ts` (remote plan §3).
  *
  * The initial head fetch happens before the runtime is constructed — the
  * effective config feeds the constructor — so this block carries the outcome:
  * the client for live updates, which heads were missing (degraded until they
- * appear), and the env-derived base config that engram overlays are applied to.
+ * appear), and the env-derived base config that record overlays are applied to.
  */
 export interface RemoteRuntimeOptions {
-  engrams: EngramClient;
-  /** Env-derived config before the core-engram overlay. */
+  records: RecordClient;
+  /** Env-derived config before the core-record overlay. */
   baseConfig: AgentConfig;
   missing: { core: boolean; providerAuth: boolean };
   coreHeadCreatedAt: number;
@@ -111,7 +111,7 @@ export interface AppRuntimeOptions {
   authTag: AuthTag;
   logger: Logger;
   clock?: Clock;
-  /** Present when the agent is engram-configured (remote plan §3.3). */
+  /** Present when the agent is record-configured (remote plan §3.3). */
   remote?: RemoteRuntimeOptions;
   /** Injected by tests; production builds a real relay supervisor. */
   relay?: RelayPort;
@@ -352,7 +352,7 @@ export class AppRuntime {
     return this.#phase;
   }
 
-  /** True while a required engram head is missing or revoked (plan §6.2.8). */
+  /** True while a required record head is missing or revoked (plan §6.2.8). */
   get degraded(): boolean {
     return this.#missing.core || this.#missing.providerAuth;
   }
@@ -655,16 +655,16 @@ export class AppRuntime {
   }
 
   /* ------------------------------------------------------------------ */
-  /* Remote mode: engram subscription, hot config, auth write-back       */
+  /* Remote mode: record subscription, hot config, auth write-back       */
   /* ------------------------------------------------------------------ */
 
   #startRemote(): void {
     const remote = this.#remote;
     if (!remote) return;
 
-    remote.engrams.subscribe([CORE_SLUG, PROVIDER_AUTH_SLUG], (slug, head) => {
-      if (slug === CORE_SLUG) void this.#onCoreEngram(head);
-      else void this.#onAuthEngram(head);
+    remote.records.subscribe([CORE_SLUG, PROVIDER_AUTH_SLUG], (slug, head) => {
+      if (slug === CORE_SLUG) void this.#onCoreRecord(head);
+      else void this.#onAuthRecord(head);
     });
 
     this.#stopAuthWatcher = watchAuthFile({
@@ -674,8 +674,8 @@ export class AppRuntime {
     });
   }
 
-  /** Applies a new core-engram head on the fly (plan §3.3). */
-  async #onCoreEngram(head: EngramHead): Promise<void> {
+  /** Applies a new core-record head on the fly (plan §3.3). */
+  async #onCoreRecord(head: RecordHead): Promise<void> {
     const remote = this.#remote;
     if (!remote) return;
     if (head.createdAt <= this.#coreHeadCreatedAt) return;
@@ -684,7 +684,7 @@ export class AppRuntime {
     const parsed = parseCoreConfig(head.body.profile);
     if (!parsed.config) {
       // A malformed head keeps the previous config: stale beats broken.
-      this.#logger.warn("rejected core engram update", { problems: parsed.problems });
+      this.#logger.warn("rejected core record update", { problems: parsed.problems });
       return;
     }
     this.#coreHeadCreatedAt = head.createdAt;
@@ -709,7 +709,7 @@ export class AppRuntime {
     this.#config = { ...next, stateDir: this.#config.stateDir, relayUrl: this.#config.relayUrl };
     this.#inactivity.arm(next.lifecycle.inactivityExitSec);
 
-    this.#logger.info("core engram applied", { createdAt: head.createdAt });
+    this.#logger.info("core record applied", { createdAt: head.createdAt });
     if (this.#missing.core) {
       this.#missing.core = false;
       this.#maybeLeaveDegraded();
@@ -717,7 +717,7 @@ export class AppRuntime {
   }
 
   /** Materialises a newer provider-auth head, or degrades on a tombstone. */
-  async #onAuthEngram(head: EngramHead): Promise<void> {
+  async #onAuthRecord(head: RecordHead): Promise<void> {
     if (head.createdAt <= this.#authHeadCreatedAt) return;
     const body = head.body as MemoryBody;
     if (body.slug !== PROVIDER_AUTH_SLUG) return;
@@ -726,7 +726,7 @@ export class AppRuntime {
     if (body.value === null) {
       // Owner revoked the credentials. Fail closed now rather than at the
       // next provider call: prompts stop, presence flips to degraded.
-      this.#logger.warn("provider-auth engram tombstoned; entering degraded mode");
+      this.#logger.warn("provider-auth record tombstoned; entering degraded mode");
       this.#missing.providerAuth = true;
       if (this.#config.presence.enabled) this.#presence.degraded();
       return;
@@ -739,7 +739,7 @@ export class AppRuntime {
       return;
     }
     await materializeAuth(this.#config.stateDir, body.value, head.createdAt);
-    this.#logger.info("provider-auth engram materialised", { createdAt: head.createdAt });
+    this.#logger.info("provider-auth record materialised", { createdAt: head.createdAt });
     if (this.#missing.providerAuth) {
       this.#missing.providerAuth = false;
       this.#maybeLeaveDegraded();
@@ -751,7 +751,7 @@ export class AppRuntime {
     const remote = this.#remote;
     if (!remote) return;
     try {
-      const head = await remote.engrams.publish(
+      const head = await remote.records.publish(
         PROVIDER_AUTH_SLUG,
         { slug: PROVIDER_AUTH_SLUG, value: content },
         { createdAt: this.#authHeadCreatedAt },
@@ -798,7 +798,7 @@ export class AppRuntime {
   #maybeLeaveDegraded(): void {
     if (this.degraded) return;
     if (this.#phase !== "running") return;
-    this.#logger.info("leaving degraded mode: all required engram heads present");
+    this.#logger.info("leaving degraded mode: all required record heads present");
     if (this.#config.presence.enabled) this.#presence.online();
   }
 

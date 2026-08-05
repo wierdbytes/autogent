@@ -3,7 +3,7 @@
  *
  * Desktop stores managed-agent keys under service `buzz-desktop` (dev builds:
  * `buzz-desktop-dev`), account `agent:<pubkey>`, value — the nsec string.
- * `autogent auth login` signs the provider-auth engram with that key, which is
+ * `autogent auth login` signs the provider-auth record with that key, which is
  * legitimate by design: the keyring on the owner machine owns the nsec in the
  * provider protocol's trust model.
  *

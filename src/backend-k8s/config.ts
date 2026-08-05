@@ -28,7 +28,7 @@ export interface K8sProviderConfig {
   /** 0 is the legal "run indefinitely" (drives restartPolicy, §4.4). */
   inactivitySeconds: number;
   /**
-   * Pi extension sources for the core engram (paths or `npm:`/`git:`). On the
+   * Pi extension sources for the core record (paths or `npm:`/`git:`). On the
    * wire this stays a flat scalar (I2): a comma-separated string.
    */
   extensions: string[];

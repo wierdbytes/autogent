@@ -91,12 +91,16 @@ export const KIND = {
   /** NIP-AM usage metrics (durable, NIP-44 encrypted agent->owner). */
   USAGE_METRIC: 44200,
   /**
-   * NIP-AE agent memory engram (parameterised replaceable, p-gated).
+   * NIP-78 application-specific data (parameterised replaceable).
    *
-   * Used by the remote-nodes plan for the `core` config engram and the
-   * `mem/provider-auth` credentials engram (docs/plans/20260804-remote-nodes.md §3).
+   * Carries the agent's own config records: the `core` config record and the
+   * `mem/provider-auth` credentials record, self-signed and NIP-44
+   * self-encrypted (d-tags are HMAC-derived, see nostr/config-records.ts).
+   * The Buzz relay accepts this kind with the same `UsersWrite` scope as
+   * profiles; NIP-RS read-state shares the kind but is keyed by
+   * `read-state:<slot>` d-tags and cannot collide with the HMAC d-tags here.
    */
-  ENGRAM: 30174,
+  APP_DATA: 30078,
   /** NIP-34 git repository announcement (read-only for the agent). */
   GIT_REPO_ANNOUNCEMENT: 30617,
   /** NIP-34 git repository state (read-only for the agent). */
@@ -123,10 +127,11 @@ export const AGENT_PUBLISHED_KINDS: readonly number[] = [
   KIND.PRESENCE,
   KIND.OBSERVER,
   KIND.USAGE_METRIC,
-  // Remote agents publish engram write-backs (OAuth refresh) and NIP-98 auth
-  // events for git/media; an attestation that misses these strands the agent
-  // mid-refresh instead of at boot.
-  KIND.ENGRAM,
+  // Remote agents publish NIP-98 auth events for git/media; an attestation
+  // that misses these strands the agent mid-request instead of at boot.
+  // KIND.APP_DATA is intentionally absent: config records are signed directly
+  // by the agent key without the NIP-OA auth tag (the record channel carries
+  // no owner linkage), so attestation coverage does not apply to them.
   KIND.HTTP_AUTH,
 ];
 

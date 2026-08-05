@@ -9,7 +9,7 @@
  *
  * The per-agent `auth.json` is *exactly* the file the pi SDK would keep in
  * `~/.pi/agent` — `Record<providerId, Credential>` — so the OAuth flow can
- * write into it directly (`ModelRuntime.create({authPath})`) and the engram
+ * write into it directly (`ModelRuntime.create({authPath})`) and the record
  * publication ships its raw bytes.
  *
  * ## 1:1 account↔agent rule

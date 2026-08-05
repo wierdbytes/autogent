@@ -4,7 +4,7 @@
  *
  * The flow itself is pi's (`ModelRuntime.login`), pointed at a caller-chosen
  * `authPath` so the credential lands in exactly the file shape the remote
- * harness materialises from the `mem/provider-auth` engram.
+ * harness materialises from the `mem/provider-auth` record.
  */
 
 import { createInterface } from "node:readline/promises";

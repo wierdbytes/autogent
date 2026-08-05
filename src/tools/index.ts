@@ -3,7 +3,7 @@
  *
  * Built once by the runtime and handed to every Pi session as `customTools`.
  * Enabling/disabling individual tools happens through the ordinary pi
- * `tools`/`excludeTools` config — which the core engram controls — so the
+ * `tools`/`excludeTools` config — which the core record controls — so the
  * owner can switch a tool off with a config push, hot.
  */
 

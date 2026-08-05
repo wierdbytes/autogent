@@ -1,6 +1,6 @@
 /**
  * `buzz-backend-autogent-k8s`: provider_config validation, manifest shapes,
- * engram-config derivation and the pre-mutation refusal order (plan §4).
+ * record-config derivation and the pre-mutation refusal order (plan §4).
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseDeployPayload } from "../src/backend/payload.js";
 import { ProviderError } from "../src/backend/wire.js";
 import { k8sConfigSchema, parseK8sProviderConfig } from "../src/backend-k8s/config.js";
-import { buildCoreConfig, buildPodEnv } from "../src/backend-k8s/engrams.js";
+import { buildCoreConfig, buildPodEnv } from "../src/backend-k8s/records.js";
 import { deployToK8s, podVerdict } from "../src/backend-k8s/deploy.js";
 import { handleRequest } from "../src/backend-k8s/main.js";
 import { podObject, pvcObject, secretObject, type AgentObjectsInput } from "../src/backend-k8s/manifests.js";
@@ -143,7 +143,7 @@ describe("manifests", () => {
     ]);
     const env = container["env"] as Array<{ name: string; value: string }>;
     const names = env.map((entry) => entry.name);
-    expect(names).toContain("AUTOGENT_ENGRAM_CONFIG");
+    expect(names).toContain("AUTOGENT_REMOTE_CONFIG");
     expect(names).toContain("AUTOGENT_INACTIVITY_EXIT");
     expect(names).toContain("AUTOGENT_RELAY_ID");
     // The nsec travels only via envFrom→Secret, never as a literal.
@@ -161,7 +161,7 @@ describe("manifests", () => {
   });
 });
 
-describe("core-engram derivation from the payload", () => {
+describe("core-record derivation from the payload", () => {
   it("projects model, prompt, gate and ceilings into the config", () => {
     const minted = mintAgent({
       model: "anthropic/claude-sonnet-4-5",
@@ -226,7 +226,7 @@ describe("core-engram derivation from the payload", () => {
       AUTOGENT_RELAY_ID: "prod",
       AUTOGENT_LOG_LEVEL: "debug",
       SOME_USER_SECRET: "must-not-travel",
-      AUTOGENT_MODEL: "goes-via-engram-not-env",
+      AUTOGENT_MODEL: "goes-via-record-not-env",
     };
     const payload = parseDeployPayload(minted.agent);
     const env = buildPodEnv(payload);

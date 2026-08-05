@@ -13,7 +13,7 @@
 | Наблюдение | Значение |
 |---|---|
 | presence `online` + heartbeat каждые 60s | агент жив и принимает промпты |
-| presence `degraded` | агент жив, но fail-closed: нет core-engram или креды невалидны/отозваны. Промпты отвергаются, `!shutdown` работает |
+| presence `degraded` | агент жив, но fail-closed: нет core-записи или креды невалидны/отозваны. Промпты отвергаются, `!shutdown` работает |
 | presence молчит > 180s | процесс мёртв или сеть до релея потеряна |
 | Pod `Succeeded` (exit 0) | намеренное завершение: `!shutdown` или inactivity-таймер (I5). Рестарта не будет — это норма |
 | Pod `Failed` / рестарты при `OnFailure` | краш; смотреть `kubectl logs` |
@@ -44,7 +44,7 @@ kubectl --context k3s-agents -n autogent logs autogent-<pubkey12> --tail=200
 
 - **Рефреш сломался** (revoked OAuth): на owner-машине
   `autogent-nostr auth login --agent <pubkey>` — новый флоу перезапишет
-  engram; работающий агент подхватит его по подписке без рестарта.
+  config-запись (kind 30078); работающий агент подхватит её по подписке без рестарта.
 - **Отзыв намеренный**: `autogent-nostr auth revoke --agent <pubkey>`
   публикует tombstone; агент уходит в degraded немедленно.
 - Правило слияния одно: свежее (по `created_at`) побеждает; агент сам
@@ -54,7 +54,7 @@ kubectl --context k3s-agents -n autogent logs autogent-<pubkey12> --tail=200
 
 Потеряны: транскрипты сессий, SQLite-история, workspace-клоны.
 **Не потеряно ничего невосстановимого**: identity приедет из Secret'а при
-следующем деплое, конфиг и OAuth-креды — из engram-голов (acceptance §12.3).
+следующем деплое, конфиг и OAuth-креды — из голов config-записей (acceptance §12.3).
 
 1. Удалить осиротевший PVC: `kubectl delete pvc autogent-<pubkey12>-data`.
 2. Redeploy из Buzz Desktop. Всё.
@@ -64,8 +64,9 @@ kubectl --context k3s-agents -n autogent logs autogent-<pubkey12> --tail=200
 Buzz Desktop → Deploy. Провайдер: новый generation-Secret → замена Pod'а
 (старый дожидается graceful-остановки, второго живого не бывает, I4) → GC
 старых Secret'ов. Обновление конфига **без** смены образа redeploy не
-требует: изменение записи агента переподписывает core-engram, агент
-применяет его на лету.
+требует: изменение записи агента переподписывает core-запись, агент
+применяет её на лету. Точечное обновление без Buzz Desktop:
+`autogent-nostr config publish --agent <pubkey> --file core-config.json`.
 
 ### Остановка
 
@@ -93,7 +94,7 @@ Buzz Desktop → Deploy. Провайдер: новый generation-Secret → з
 | Артефакт | Место |
 |---|---|
 | nsec | k8s Secret `autogent-<pubkey12>-<generation>` + OS keyring owner'а |
-| конфиг агента | engram `core` (kind 30174), шифртекст NIP-44 |
-| OAuth-креды | engram `mem/provider-auth` + `~/.config/autogent/agents/<pubkey>/auth.json` на owner-машине |
+| конфиг агента | config-запись `core` (kind 30078), NIP-44-шифртекст к собственному ключу агента |
+| OAuth-креды | config-запись `mem/provider-auth` + `~/.config/autogent/agents/<pubkey>/auth.json` на owner-машине |
 | состояние/workspace | PVC `autogent-<pubkey12>-data`, смонтирован в `/data` |
 | образ | `ghcr.io/wierdbytes/autogent` (тег резолвится в digest при деплое; Pod всегда digest-pinned) |

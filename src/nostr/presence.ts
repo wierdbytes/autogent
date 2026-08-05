@@ -54,7 +54,7 @@ export class PresencePublisher {
 
   /**
    * Degraded: the agent is reachable for owner diagnostics but refuses
-   * prompts (missing engram heads / invalid credentials, remote plan §6.2.8).
+   * prompts (missing record heads / invalid credentials, remote plan §6.2.8).
    * Presence-is-status is the only management channel, so the state must be
    * visible on the relay rather than only in Pod logs.
    */

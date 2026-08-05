@@ -97,12 +97,13 @@ export interface LifecycleConfig {
 
 export interface RemoteConfig {
   /**
-   * When true the agent is engram-configured (remote plan §3.3): the `core`
-   * head overrides env, `mem/provider-auth` is materialised into a pi
-   * `auth.json`, and a missing head is fail-closed degraded rather than "start
-   * empty". Set by the k8s provider; off for local development.
+   * When true the agent is record-configured (remote plan §3.3): the `core`
+   * config-record head (kind 30078) overrides env, `mem/provider-auth` is
+   * materialised into a pi `auth.json`, and a missing head is fail-closed
+   * degraded rather than "start empty". Set by the k8s provider; off for
+   * local development.
    */
-  engramConfig: boolean;
+  recordConfig: boolean;
 }
 
 export interface AgentConfig {
@@ -161,7 +162,7 @@ export function defaultConfig(): AgentConfig {
     telemetry: { enabled: true, coalesceMs: 40, metricsEnabled: true },
     output: { maxMessageBytes: 16_000, oversizePolicy: "split" },
     lifecycle: { inactivityExitSec: 0, shutdownBudgetSec: 60 },
-    remote: { engramConfig: false },
+    remote: { recordConfig: false },
     logLevel: "info",
   };
 }
@@ -254,7 +255,8 @@ export function applyEnv(base: AgentConfig, env = process.env): AgentConfig {
     envNumber("AUTOGENT_INACTIVITY_EXIT") ?? next.lifecycle.inactivityExitSec;
   next.lifecycle.shutdownBudgetSec =
     envNumber("AUTOGENT_SHUTDOWN_BUDGET") ?? next.lifecycle.shutdownBudgetSec;
-  next.remote.engramConfig = envBool("AUTOGENT_ENGRAM_CONFIG") ?? next.remote.engramConfig;
+  next.remote.recordConfig =
+    envBool("AUTOGENT_REMOTE_CONFIG") ?? envBool("AUTOGENT_ENGRAM_CONFIG") ?? next.remote.recordConfig;
 
   next.output.maxMessageBytes =
     envNumber("AUTOGENT_MAX_MESSAGE_BYTES") ?? next.output.maxMessageBytes;

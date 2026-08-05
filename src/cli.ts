@@ -28,6 +28,7 @@ import { createIdentityStore, ProvisioningError } from "./provisioning/identity-
 import { initIdentity, initInstructions } from "./provisioning/init.js";
 import { formatUpResult, up } from "./backend/up.js";
 import { commandAuthLogin, commandAuthRevoke, commandAuthStatus } from "./owner-auth/cli.js";
+import { commandConfigPublish, commandConfigShow } from "./owner-auth/config-cli.js";
 import { ProfileReconciler } from "./nostr/profile.js";
 import { createEventBuilder } from "./nostr/event-builder.js";
 import { RelaySupervisor } from "./nostr/relay-supervisor.js";
@@ -49,6 +50,9 @@ Usage:
   autogent-nostr auth login  --agent <pubkey> [--relay <url>] [--nsec-file <path>]
   autogent-nostr auth status [--agent <pubkey>]
   autogent-nostr auth revoke --agent <pubkey> [--relay <url>] [--nsec-file <path>]
+  autogent-nostr config show    --agent <pubkey> [--relay <url>] [--nsec-file <path>]
+  autogent-nostr config publish --agent <pubkey> --file <core-config.json>
+                                [--relay <url>] [--nsec-file <path>]
   autogent-nostr profile sync
   autogent-nostr doctor
   autogent-nostr run
@@ -66,7 +70,13 @@ Commands:
   channel remove    Remove a member from a channel (OWNER host).
   auth              Bind an Anthropic OAuth account to a remote agent (OWNER host):
                     the credential is stored per agent and published as the
-                    mem/provider-auth engram, which the remote Pod reads at boot.
+                    mem/provider-auth config record (kind 30078), which the
+                    remote Pod reads at boot.
+  config show/publish
+                    Inspect or update a remote agent's core config record
+                    (OWNER host — signs with the agent key, no redeploy needed;
+                    the running agent reconfigures live). Plain 'config' prints
+                    this host's env-derived local config.
   profile sync      Republish kind 0 / kind 10100 if they are missing or stale.
   doctor            Check identity, permissions, configuration and Pi availability.
   run               Start the agent in the foreground (this process becomes it).
@@ -397,8 +407,20 @@ export async function main(argv: string[]): Promise<number> {
       return commandProfileSync();
     case "doctor":
       return commandDoctor();
-    case "config":
-      return commandConfig();
+    case "config": {
+      const sub = flags.positional[0];
+      if (sub === undefined) return commandConfig();
+      const configFlags = {
+        agent: flags.values.get("agent") ?? flags.positional[1],
+        relay: flags.values.get("relay"),
+        nsecFile: flags.values.get("nsec-file"),
+        file: flags.values.get("file"),
+      };
+      if (sub === "show") return commandConfigShow(configFlags);
+      if (sub === "publish") return commandConfigPublish(configFlags);
+      process.stderr.write("unknown config subcommand; expected `show` or `publish` (or none)\n");
+      return 2;
+    }
     case "up":
       return commandUp(flags);
     case "run":

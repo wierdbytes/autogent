@@ -4,19 +4,20 @@
  * Secrets are read once, handed to the signer, and scrubbed from the
  * environment before anything the model can reach is constructed (plan §10.1).
  *
- * In engram-configured (remote) mode the boot order is relay-first (remote
+ * In record-configured (remote) mode the boot order is relay-first (remote
  * plan §3): the sealed identity may be materialised from the deploy Secret's
- * env triple, then the `core` and `mem/provider-auth` engram heads are fetched
- * over the same authenticated relay connection the runtime will keep, and only
- * then is the runtime constructed — with the engram-derived effective config,
- * or degraded (prompts refused, presence "degraded") when a head is missing.
+ * env triple, then the `core` and `mem/provider-auth` config-record heads are
+ * fetched over the same authenticated relay connection the runtime will keep,
+ * and only then is the runtime constructed — with the record-derived effective
+ * config, or degraded (prompts refused, presence "degraded") when a head is
+ * missing.
  */
 
 import { mkdirSync } from "node:fs";
 import { applyEnv, defaultConfig, validateConfig, type AgentConfig } from "./config.js";
-import { EngramClient } from "./nostr/engram-client.js";
+import { RecordClient } from "./nostr/record-client.js";
 import { createEventBuilder } from "./nostr/event-builder.js";
-import { CORE_SLUG, isCoreBody, PROVIDER_AUTH_SLUG, type MemoryBody } from "./nostr/nip-ae.js";
+import { CORE_SLUG, isCoreBody, PROVIDER_AUTH_SLUG, type MemoryBody } from "./nostr/config-records.js";
 import { RelaySupervisor } from "./nostr/relay-supervisor.js";
 import { bootstrapIdentityFromEnv } from "./provisioning/bootstrap.js";
 import { createIdentityStore } from "./provisioning/identity-store.js";
@@ -41,7 +42,7 @@ interface RemoteBootstrap {
 }
 
 /**
- * Relay-first bootstrap for engram-configured agents (remote plan §3.2–3.3).
+ * Relay-first bootstrap for record-configured agents (remote plan §3.2–3.3).
  *
  * Never throws on a missing head — missing is a *state* (degraded), not an
  * error — but does propagate connection failures: without the relay there is
@@ -63,12 +64,11 @@ async function bootstrapRemote(
   });
   await relay.connect();
 
-  const engrams = new EngramClient({
+  const records = new RecordClient({
     relay,
     signer,
-    builder,
     clock: systemClock,
-    logger: logger.child({ component: "engrams" }),
+    logger: logger.child({ component: "records" }),
   });
 
   // Pi credentials live inside the sealed state dir, not in $HOME: the tool
@@ -80,7 +80,7 @@ async function bootstrapRemote(
   let effective = baseConfig;
   let missingCore = true;
   let coreHeadCreatedAt = 0;
-  const coreHead = await engrams.fetchHead(CORE_SLUG);
+  const coreHead = await records.fetchHead(CORE_SLUG);
   if (coreHead && isCoreBody(coreHead.body)) {
     const parsed = parseCoreConfig(coreHead.body.profile);
     if (parsed.config) {
@@ -94,17 +94,17 @@ async function bootstrapRemote(
         // A head that parses but validates unusable is treated like a missing
         // head: degraded on the base config beats a crash loop the owner can
         // only observe as "pod restarting".
-        for (const problem of problems) logger.error("core engram config unusable", { problem });
+        for (const problem of problems) logger.error("core record config unusable", { problem });
       }
     } else {
-      for (const problem of parsed.problems) logger.error("core engram rejected", { problem });
+      for (const problem of parsed.problems) logger.error("core record rejected", { problem });
     }
   } else {
-    logger.warn("no core engram head; starting degraded");
+    logger.warn("no core config record head; starting degraded");
   }
 
   // --- provider-auth head -------------------------------------------------
-  const authHead = await engrams.fetchHead(PROVIDER_AUTH_SLUG);
+  const authHead = await records.fetchHead(PROVIDER_AUTH_SLUG);
   const headView =
     authHead && authHead.body.slug === PROVIDER_AUTH_SLUG
       ? { content: (authHead.body as MemoryBody).value, createdAt: authHead.createdAt }
@@ -115,16 +115,16 @@ async function bootstrapRemote(
   let authHeadCreatedAt = authHead?.createdAt ?? 0;
   switch (reconciled.action) {
     case "missing":
-      logger.warn("no provider-auth engram and no local auth.json; starting degraded");
+      logger.warn("no provider-auth record and no local auth.json; starting degraded");
       missingAuth = true;
       break;
     case "revoked":
-      logger.warn("provider-auth engram is tombstoned; starting degraded");
+      logger.warn("provider-auth record is tombstoned; starting degraded");
       missingAuth = true;
       break;
     case "publish-local":
       try {
-        const head = await engrams.publish(
+        const head = await records.publish(
           PROVIDER_AUTH_SLUG,
           { slug: PROVIDER_AUTH_SLUG, value: reconciled.content },
           { createdAt: authHeadCreatedAt },
@@ -140,7 +140,7 @@ async function bootstrapRemote(
       }
       break;
     case "materialized":
-      logger.info("provider-auth engram materialised into auth.json");
+      logger.info("provider-auth record materialised into auth.json");
       break;
     case "none":
       break;
@@ -150,7 +150,7 @@ async function bootstrapRemote(
     config: effective,
     relay,
     remote: {
-      engrams,
+      records,
       baseConfig,
       missing: { core: missingCore, providerAuth: missingAuth },
       coreHeadCreatedAt,
@@ -203,7 +203,7 @@ export async function run(options: RunOptions = {}): Promise<number> {
 
   let relay: RelayPort | undefined;
   let remote: RemoteRuntimeOptions | undefined;
-  if (config.remote.engramConfig) {
+  if (config.remote.recordConfig) {
     let bootstrapped: RemoteBootstrap;
     try {
       bootstrapped = await bootstrapRemote(config, signer, record.auth, logger);

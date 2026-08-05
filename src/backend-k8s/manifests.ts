@@ -100,7 +100,7 @@ export function podObject(input: AgentObjectsInput): Record<string, unknown> {
           imagePullPolicy: "IfNotPresent",
           env: [
             ...Object.entries({
-              AUTOGENT_ENGRAM_CONFIG: "1",
+              AUTOGENT_REMOTE_CONFIG: "1",
               AUTOGENT_INACTIVITY_EXIT: String(input.config.inactivitySeconds),
               ...input.extraEnv,
             }).map(([name, value]) => ({ name, value })),

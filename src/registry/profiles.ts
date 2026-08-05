@@ -43,7 +43,7 @@ export interface DeployProfile {
   inactivitySeconds: number;
   /**
    * Pi extension sources loaded into every session (paths or `npm:`/`git:`
-   * specifiers). Travels to the Pod via the core engram at deploy.
+   * specifiers). Travels to the Pod via the core config record at deploy.
    */
   extensions: string[];
   /** Bound at first deploy from the GUI payload; null = never deployed. */

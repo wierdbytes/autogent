@@ -35,7 +35,7 @@ export class ContextFetcher {
     this.#limit = deps.limit;
   }
 
-  /** Core-engram hot update (remote plan §3.3). Takes effect on the next fetch. */
+  /** Core-record hot update (remote plan §3.3). Takes effect on the next fetch. */
   setLimit(limit: number): void {
     this.#limit = limit;
   }

@@ -1,7 +1,7 @@
 /**
- * Core-engram configuration (remote plan §3.3).
+ * Core-record configuration (remote plan §3.3).
  *
- * The `core` engram carries the owner-side effective config as a versioned
+ * The `core` record carries the owner-side effective config as a versioned
  * JSON document, embedded in the NIP-AE core body's `profile` field. It is a
  * derived artifact: Desktop/CLI recompute and republish it on every deploy and
  * agent-record change, so the runtime treats the head as authoritative and the
@@ -79,7 +79,7 @@ export interface ParsedCoreConfig {
 }
 
 /**
- * Parses the config JSON found in the core engram's `profile` field.
+ * Parses the config JSON found in the core record's `profile` field.
  *
  * Strict on the envelope (`v: 1` or reject — an unknown version may carry
  * semantics we would silently misapply), tolerant on unknown extra keys so a
@@ -167,8 +167,8 @@ export function parseCoreConfig(profile: string): ParsedCoreConfig {
 /**
  * Overlays a core config onto a base (env-derived) config.
  *
- * The engram head wins wherever it says something; base values survive where
- * it is silent (plan §3.3, precedence: engram > env).
+ * The record head wins wherever it says something; base values survive where
+ * it is silent (plan §3.3, precedence: record > env).
  */
 export function applyCoreConfig(base: AgentConfig, core: CoreConfigV1): AgentConfig {
   const next: AgentConfig = structuredClone(base);
@@ -190,7 +190,7 @@ export function applyCoreConfig(base: AgentConfig, core: CoreConfigV1): AgentCon
   return next;
 }
 
-/** Serialises an effective config into the core-engram `profile` payload. */
+/** Serialises an effective config into the core-record `profile` payload. */
 export function serializeCoreConfig(config: CoreConfigV1): string {
   return JSON.stringify(config);
 }

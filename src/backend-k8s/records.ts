@@ -1,18 +1,22 @@
 /**
- * Engram publication during `deploy` (remote plan §4.3 step 3).
+ * Config-record publication during `deploy` (remote plan §4.3 step 3).
  *
  * The provider holds the nsec by design (that is its job in the provider
- * protocol), so it can sign as the agent: the `core` engram is derived from
+ * protocol), so it can sign as the agent: the `core` record is derived from
  * the deploy payload's effective config, and `mem/provider-auth` ships the
  * credential file that `autogent auth login` produced. Both are on the relay
  * *before* any k8s object exists, so a Pod never starts into a world where
  * its config could not have arrived yet.
+ *
+ * The records are kind 30078, self-encrypted to the agent key and published
+ * without the NIP-OA auth tag; the builder below exists only for the NIP-42
+ * connection handshake, which the relay does gate on the attestation.
  */
 
 import type { DeployPayload } from "../backend/payload.js";
-import { EngramClient } from "../nostr/engram-client.js";
+import { RecordClient } from "../nostr/record-client.js";
 import { createEventBuilder } from "../nostr/event-builder.js";
-import { CORE_SLUG, PROVIDER_AUTH_SLUG } from "../nostr/nip-ae.js";
+import { CORE_SLUG, PROVIDER_AUTH_SLUG } from "../nostr/config-records.js";
 import { RelaySupervisor } from "../nostr/relay-supervisor.js";
 import { createSigner } from "../nostr/signer.js";
 import { fail } from "../backend/wire.js";
@@ -20,7 +24,7 @@ import { systemClock } from "../runtime/clock.js";
 import { nullLogger } from "../runtime/logger.js";
 import type { CoreConfigV1 } from "../runtime/remote-config.js";
 
-/** Non-secret env the Pod receives directly instead of via the engram. */
+/** Non-secret env the Pod receives directly instead of via the record. */
 export const POD_ENV_PASSTHROUGH: readonly string[] = [
   "AUTOGENT_RELAY_ID",
   "AUTOGENT_TELEMETRY",
@@ -53,7 +57,7 @@ function listOf(value: string | undefined): string[] | undefined {
 }
 
 /**
- * Derives the core-engram config from the payload (`launch.env` never reaches
+ * Derives the core-record config from the payload (`launch.env` never reaches
  * the Pod — this projection is how the desktop's effective config travels).
  */
 export function buildCoreConfig(
@@ -118,7 +122,7 @@ export function buildPodEnv(payload: DeployPayload): Record<string, string> {
   return out;
 }
 
-export interface PublishEngramsInput {
+export interface PublishRecordsInput {
   payload: DeployPayload;
   inactivitySeconds: number;
   /** From the deploy profile; overridden by `AUTOGENT_EXTENSIONS` in the payload env. */
@@ -128,10 +132,11 @@ export interface PublishEngramsInput {
 }
 
 /**
- * Signs and publishes both engrams over an authenticated relay connection.
- * Throws (in-band `ok:false` upstream) when the relay refuses either head.
+ * Signs and publishes both config records over an authenticated relay
+ * connection. Throws (in-band `ok:false` upstream) when the relay refuses
+ * either head.
  */
-export async function publishDeployEngrams(input: PublishEngramsInput): Promise<void> {
+export async function publishDeployRecords(input: PublishRecordsInput): Promise<void> {
   const { payload } = input;
   const signer = createSigner(new Uint8Array(payload.secret));
   const builder = createEventBuilder({ signer, authTag: payload.auth, clock: systemClock });
@@ -144,17 +149,17 @@ export async function publishDeployEngrams(input: PublishEngramsInput): Promise<
 
   try {
     await relay.connect();
-    const engrams = new EngramClient({ relay, signer, builder, clock: systemClock });
+    const records = new RecordClient({ relay, signer, clock: systemClock });
 
     const core = buildCoreConfig(payload, input.inactivitySeconds, input.extensions ?? []);
-    await engrams.publish(CORE_SLUG, { slug: CORE_SLUG, profile: JSON.stringify(core) });
-    await engrams.publish(PROVIDER_AUTH_SLUG, {
+    await records.publish(CORE_SLUG, { slug: CORE_SLUG, profile: JSON.stringify(core) });
+    await records.publish(PROVIDER_AUTH_SLUG, {
       slug: PROVIDER_AUTH_SLUG,
       value: input.providerAuthJson,
     });
   } catch (error) {
     fail(
-      `failed to publish deploy engrams to ${payload.relayUrl}: ` +
+      `failed to publish deploy records to ${payload.relayUrl}: ` +
         `${error instanceof Error ? error.message : String(error)}`,
     );
   } finally {

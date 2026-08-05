@@ -5,7 +5,7 @@
  * generation. Order is load-bearing:
  *
  *   1. refuse without local provider credentials (fail-closed before anything);
- *   2. publish engrams (config + credentials exist before the Pod can start);
+ *   2. publish config records (config + credentials exist before the Pod can start);
  *   3. Secret write-first, then PVC;
  *   4. replace any prior-generation Pod (I4: never two live instances);
  *   5. wait for the container to actually start (accepted ≠ running);
@@ -17,7 +17,7 @@ import { fail } from "../backend/wire.js";
 import { readAgentAuth } from "../owner-auth/store.js";
 import { adoptProfileCredential } from "../registry/profiles.js";
 import type { K8sProviderConfig } from "./config.js";
-import { buildPodEnv, publishDeployEngrams } from "./engrams.js";
+import { buildPodEnv, publishDeployRecords } from "./records.js";
 import { apply, deleteAndWait, getJson, listJson, type KubectlOptions } from "./kubectl.js";
 import {
   ANNOTATION_GENERATION,
@@ -84,8 +84,8 @@ export async function deployToK8s(input: K8sDeployInput): Promise<K8sDeployOutco
     );
   }
 
-  // 2. Engrams before substrate: the Pod reads them at first start.
-  await publishDeployEngrams({
+  // 2. Records before substrate: the Pod reads them at first start.
+  await publishDeployRecords({
     payload,
     inactivitySeconds: config.inactivitySeconds,
     extensions: config.extensions,

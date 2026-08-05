@@ -342,7 +342,7 @@ export interface SessionRegistryPort {
   /** Opens or creates the persistent Pi session for a channel. */
   acquire(channelId: string): Promise<AgentSessionHandle>;
   /**
-   * Applies a config change to future sessions (core-engram hot update).
+   * Applies a config change to future sessions (core-record hot update).
    * Optional: test fakes and registries without live reconfig may omit it.
    */
   applyConfig?(update: {

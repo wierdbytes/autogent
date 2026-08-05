@@ -1,5 +1,5 @@
 /**
- * Remote (engram-configured) runtime behaviour: degraded fail-closed mode,
+ * Remote (record-configured) runtime behaviour: degraded fail-closed mode,
  * hot core-config application and provider-auth updates (remote plan §3, §6.2).
  */
 import { mkdtempSync, rmSync } from "node:fs";
@@ -8,13 +8,12 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { defaultConfig, type AgentConfig } from "../src/config.js";
-import { EngramClient } from "../src/nostr/engram-client.js";
-import { createEventBuilder } from "../src/nostr/event-builder.js";
+import { RecordClient } from "../src/nostr/record-client.js";
 import {
   CORE_SLUG,
   PROVIDER_AUTH_SLUG,
-  deriveEngramDTag,
-} from "../src/nostr/nip-ae.js";
+  deriveRecordDTag,
+} from "../src/nostr/config-records.js";
 import { signAttestation } from "../src/nostr/nip-oa.js";
 import { createSigner, type Signer } from "../src/nostr/signer.js";
 import { KIND, type NostrEvent, type NostrTag } from "../src/nostr/types.js";
@@ -35,7 +34,7 @@ async function settle(rounds = 12): Promise<void> {
 }
 
 /**
- * Polls until `predicate` holds. The engram handlers run real fs I/O, whose
+ * Polls until `predicate` holds. The record handlers run real fs I/O, whose
  * completion is not bounded by a fixed number of microtask rounds.
  */
 async function waitFor(predicate: () => boolean, timeoutMs = 3_000): Promise<void> {
@@ -54,7 +53,7 @@ interface RemoteHarness {
   agentSecret: Uint8Array;
   ownerPubkey: string;
   stateDir: string;
-  engramEvent(slug: string, body: unknown, createdAt: number): NostrEvent;
+  recordEvent(slug: string, body: unknown, createdAt: number): NostrEvent;
   chatFrom(secret: Uint8Array, content: string): NostrEvent;
 }
 
@@ -111,8 +110,7 @@ async function bootRemote(options: {
 
   const state = openInMemoryDatabase();
   const session = new FakeSession("session-remote");
-  const builder = createEventBuilder({ signer, authTag, clock: systemClock });
-  const engrams = new EngramClient({ relay, signer, builder, clock: systemClock });
+  const records = new RecordClient({ relay, signer, clock: systemClock });
 
   const baseConfig: AgentConfig = {
     ...defaultConfig(),
@@ -121,7 +119,7 @@ async function bootRemote(options: {
     security: { ...defaultConfig().security, respondTo: "anyone" },
     presence: { enabled: true, heartbeatSec: 3600 },
     scheduler: { ...defaultConfig().scheduler, contextMessageLimit: 0 },
-    remote: { engramConfig: true },
+    remote: { recordConfig: true },
     ...options.config,
   };
 
@@ -141,7 +139,7 @@ async function bootRemote(options: {
       disposeAll: async () => {},
     },
     remote: {
-      engrams,
+      records,
       baseConfig,
       missing: options.missing ?? { core: false, providerAuth: false },
       coreHeadCreatedAt: 0,
@@ -160,16 +158,13 @@ async function bootRemote(options: {
     agentSecret,
     ownerPubkey,
     stateDir,
-    engramEvent(slug, body, createdAt) {
+    recordEvent(slug, body, createdAt) {
       return finalizeEvent(
         {
-          kind: KIND.ENGRAM,
+          kind: KIND.APP_DATA,
           created_at: createdAt,
-          tags: [
-            ["d", deriveEngramDTag(signer, ownerPubkey, slug)],
-            ["p", ownerPubkey],
-          ],
-          content: signer.encrypt(ownerPubkey, JSON.stringify(body)),
+          tags: [["d", deriveRecordDTag(signer, slug)]],
+          content: signer.encrypt(signer.publicKey, JSON.stringify(body)),
         },
         agentSecret,
       ) as NostrEvent;
@@ -214,13 +209,13 @@ describe("degraded mode", () => {
     harness = await bootRemote({ missing: { core: true, providerAuth: true } });
 
     harness.relay.deliver(
-      harness.engramEvent(CORE_SLUG, { slug: "core", profile: JSON.stringify({ v: 1 }) }, 1_800_000_000),
+      harness.recordEvent(CORE_SLUG, { slug: "core", profile: JSON.stringify({ v: 1 }) }, 1_800_000_000),
     );
     await settle();
     expect(harness.runtime.degraded).toBe(true); // auth still missing
 
     harness.relay.deliver(
-      harness.engramEvent(
+      harness.recordEvent(
         PROVIDER_AUTH_SLUG,
         { slug: PROVIDER_AUTH_SLUG, value: '{"anthropic":{"type":"oauth"}}' },
         1_800_000_001,
@@ -242,7 +237,7 @@ describe("degraded mode", () => {
     expect(harness.runtime.degraded).toBe(false);
 
     harness.relay.deliver(
-      harness.engramEvent(PROVIDER_AUTH_SLUG, { slug: PROVIDER_AUTH_SLUG, value: null }, 1_800_000_000),
+      harness.recordEvent(PROVIDER_AUTH_SLUG, { slug: PROVIDER_AUTH_SLUG, value: null }, 1_800_000_000),
     );
     await waitFor(() => harness.runtime.degraded);
     expect(harness.runtime.degraded).toBe(true);
@@ -261,9 +256,9 @@ describe("hot core-config application", () => {
   it("applies a respond_to change immediately", async () => {
     harness = await bootRemote({ missing: { core: false, providerAuth: false } });
 
-    // Base config answers anyone; the engram tightens to owner-only.
+    // Base config answers anyone; the record tightens to owner-only.
     harness.relay.deliver(
-      harness.engramEvent(
+      harness.recordEvent(
         CORE_SLUG,
         { slug: "core", profile: JSON.stringify({ v: 1, respond_to: "owner-only" }) },
         1_800_000_000,
@@ -282,7 +277,7 @@ describe("hot core-config application", () => {
 
     // Malformed config: rejected, gate unchanged (still anyone).
     harness.relay.deliver(
-      harness.engramEvent(
+      harness.recordEvent(
         CORE_SLUG,
         { slug: "core", profile: JSON.stringify({ v: 1, respond_to: "everyone" }) },
         1_800_000_000,

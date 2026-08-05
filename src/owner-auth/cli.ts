@@ -1,28 +1,23 @@
 /**
  * `autogent-nostr auth` — owner-side provider credentials (remote plan §7).
  *
- *   auth login  --agent <pubkey>   OAuth flow → per-agent auth.json → engram
+ *   auth login  --agent <pubkey>   OAuth flow → per-agent auth.json → config record
  *   auth status [--agent <pubkey>] bindings and token freshness
- *   auth revoke --agent <pubkey>   tombstone the engram, drop the binding
+ *   auth revoke --agent <pubkey>   tombstone the record, drop the binding
  *
  * The OAuth flow itself is pi's (`ModelRuntime.login`), pointed at a per-agent
  * `authPath` so the credential lands in exactly the file shape the remote
- * harness materialises from the engram. The engram is signed with the agent's
+ * harness materialises from the record. The record is signed with the agent's
  * key from Buzz Desktop's OS keyring; the NIP-OA auth tag is recovered from
- * the agent's published kind 0 profile on the relay.
+ * the agent's published kind 0 profile on the relay and is used only for the
+ * NIP-42 connection handshake — the record event itself carries no auth tag.
  */
 
-import { readFile } from "node:fs/promises";
-import { EngramClient } from "../nostr/engram-client.js";
-import { createEventBuilder } from "../nostr/event-builder.js";
-import { PROVIDER_AUTH_SLUG } from "../nostr/nip-ae.js";
-import { extractAuthTag, type AuthTag } from "../nostr/nip-oa.js";
-import { RelaySupervisor } from "../nostr/relay-supervisor.js";
-import { createSigner, decodeSecretKey, isPubkey, type Signer } from "../nostr/signer.js";
-import { KIND } from "../nostr/types.js";
+import { RecordClient } from "../nostr/record-client.js";
+import { PROVIDER_AUTH_SLUG } from "../nostr/config-records.js";
+import { isPubkey, type Signer } from "../nostr/signer.js";
 import { systemClock } from "../runtime/clock.js";
-import { nullLogger } from "../runtime/logger.js";
-import { readAgentNsecFromKeyring } from "./keyring.js";
+import { connectAsAgent, resolveAgentSigner, resolveRelayUrl } from "./agent-relay.js";
 import { runOAuthLogin } from "./oauth.js";
 import {
   agentAuthPath,
@@ -39,93 +34,22 @@ interface AuthFlags {
   nsecFile?: string;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Agent identity plumbing                                                    */
-/* -------------------------------------------------------------------------- */
-
-async function resolveAgentSigner(agentPubkey: string, flags: AuthFlags): Promise<Signer> {
-  let nsec: string | null = null;
-  if (flags.nsecFile) {
-    nsec = (await readFile(flags.nsecFile, "utf8")).trim();
-  } else {
-    nsec = await readAgentNsecFromKeyring(agentPubkey);
-  }
-  if (nsec === null) {
-    throw new Error(
-      `agent key not found in the OS keyring (service buzz-desktop, account agent:${agentPubkey}). ` +
-        `If the agent was not created by Buzz Desktop on this machine, pass --nsec-file <path>.`,
-    );
-  }
-  const signer = createSigner(decodeSecretKey(nsec));
-  if (signer.publicKey !== agentPubkey) {
-    throw new Error(
-      `the key resolved for --agent derives pubkey ${signer.publicKey}, not ${agentPubkey} — refusing`,
-    );
-  }
-  return signer;
-}
-
-function resolveRelayUrl(flags: AuthFlags): string {
-  const url =
-    flags.relay ?? process.env["AUTOGENT_RELAY_URL"] ?? process.env["BUZZ_RELAY_URL"] ?? null;
-  if (url === null || !/^wss?:\/\//.test(url)) {
-    throw new Error("relay URL required: pass --relay wss://… or set AUTOGENT_RELAY_URL");
-  }
-  return url;
-}
-
 /**
- * Publishes (or tombstones) the provider-auth engram as the agent.
+ * Publishes (or tombstones) the provider-auth record as the agent.
  *
- * The NIP-OA auth tag comes off the agent's own kind 0 profile: it is public,
- * relay-verified, and the one artifact that must exist for any provisioned
- * agent.
+ * The NIP-OA auth tag (recovered from the agent's kind 0 profile inside
+ * `connectAsAgent`) authenticates the relay connection; the record itself is
+ * a plain self-signed kind 30078 event.
  */
-async function publishAuthEngram(
+async function publishAuthRecord(
   signer: Signer,
   relayUrl: string,
   value: string | null,
 ): Promise<void> {
-  const probe = new RelaySupervisor({
-    url: relayUrl,
-    // The metadata query needs no NIP-OA identity of ours; a plain builder
-    // would not authenticate as the agent though, so the real builder below
-    // re-connects once the tag is known.
-    builder: {
-      build: (draft) =>
-        signer.sign({
-          pubkey: signer.publicKey,
-          created_at: draft.created_at ?? Math.floor(Date.now() / 1000),
-          kind: draft.kind,
-          tags: draft.tags,
-          content: draft.content,
-        }),
-    },
-    clock: systemClock,
-    logger: nullLogger,
-  });
-
-  let authTag: AuthTag | null = null;
+  const relay = await connectAsAgent(signer, relayUrl);
   try {
-    await probe.connect();
-    const profiles = await probe.query([{ kinds: [KIND.METADATA], authors: [signer.publicKey], limit: 1 }]);
-    authTag = profiles[0] ? extractAuthTag(profiles[0].tags) : null;
-  } finally {
-    await probe.close();
-  }
-  if (!authTag) {
-    throw new Error(
-      "could not recover the agent's NIP-OA auth tag from its kind 0 profile — has the agent " +
-        "ever been provisioned on this relay?",
-    );
-  }
-
-  const builder = createEventBuilder({ signer, authTag, clock: systemClock });
-  const relay = new RelaySupervisor({ url: relayUrl, builder, clock: systemClock, logger: nullLogger });
-  try {
-    await relay.connect();
-    const engrams = new EngramClient({ relay, signer, builder, clock: systemClock });
-    await engrams.publish(PROVIDER_AUTH_SLUG, { slug: PROVIDER_AUTH_SLUG, value });
+    const records = new RecordClient({ relay, signer, clock: systemClock });
+    await records.publish(PROVIDER_AUTH_SLUG, { slug: PROVIDER_AUTH_SLUG, value });
   } finally {
     await relay.close();
   }
@@ -166,11 +90,11 @@ export async function commandAuthLogin(flags: AuthFlags): Promise<number> {
   }
 
   try {
-    await publishAuthEngram(signer, relayUrl, authJson);
+    await publishAuthRecord(signer, relayUrl, authJson);
     process.stdout.write(`Published mem/provider-auth for agent ${agent}\n`);
   } catch (error) {
     process.stderr.write(
-      `credential stored locally, but the engram publish failed: ` +
+      `credential stored locally, but the record publish failed: ` +
         `${error instanceof Error ? error.message : String(error)}\n` +
         `The next deploy will publish it.\n`,
     );
@@ -219,7 +143,7 @@ export async function commandAuthRevoke(flags: AuthFlags): Promise<number> {
 
   const signer = await resolveAgentSigner(agent, flags);
   const relayUrl = resolveRelayUrl(flags);
-  await publishAuthEngram(signer, relayUrl, null);
+  await publishAuthRecord(signer, relayUrl, null);
   const removed = await removeBinding(agent);
   process.stdout.write(
     `Tombstoned mem/provider-auth for ${agent}` +

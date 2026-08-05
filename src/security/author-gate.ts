@@ -110,7 +110,7 @@ export class AuthorGate {
   }
 
   /**
-   * Applies a core-engram policy change immediately (remote plan §3.3).
+   * Applies a core-record policy change immediately (remote plan §3.3).
    *
    * Only the respond-to surface is hot-swappable: identity and owner are
    * immutable for the life of the process, and siblings stay operator-vouched.

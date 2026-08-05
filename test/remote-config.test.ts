@@ -75,7 +75,7 @@ describe("parseCoreConfig", () => {
 });
 
 describe("applyCoreConfig", () => {
-  it("lets the engram override env and keeps base values where silent", () => {
+  it("lets the record override env and keeps base values where silent", () => {
     const base = defaultConfig();
     base.pi.model = "anthropic/from-env";
     base.security.respondTo = "anyone";
@@ -83,12 +83,12 @@ describe("applyCoreConfig", () => {
 
     const next = applyCoreConfig(base, {
       v: 1,
-      model: "anthropic/from-engram",
+      model: "anthropic/from-record",
       scheduler: { max_concurrent_turns: 2 },
       inactivity_exit_sec: 600,
     });
 
-    expect(next.pi.model).toBe("anthropic/from-engram");
+    expect(next.pi.model).toBe("anthropic/from-record");
     expect(next.scheduler.maxConcurrentTurns).toBe(2);
     expect(next.lifecycle.inactivityExitSec).toBe(600);
     // silent fields keep the base

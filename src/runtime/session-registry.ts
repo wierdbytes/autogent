@@ -148,7 +148,7 @@ export class SessionRegistry implements SessionRegistryPort {
   }
 
   /**
-   * Applies a core-engram config change (remote plan §3.3).
+   * Applies a core-record config change (remote plan §3.3).
    *
    * New sessions pick the new parameters up immediately; live channel sessions
    * are recreated lazily — dropped from memory here, reopened from their

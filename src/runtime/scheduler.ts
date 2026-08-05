@@ -25,7 +25,7 @@ export class Semaphore {
   }
 
   /**
-   * Resizes the ceiling at runtime (core-engram hot update, remote plan §3.3).
+   * Resizes the ceiling at runtime (core-record hot update, remote plan §3.3).
    *
    * Growth wakes as many waiters as new permits exist. Shrinking never revokes
    * a permit already held — running turns finish; the lower ceiling binds as

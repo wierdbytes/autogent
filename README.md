@@ -16,7 +16,7 @@ autogent-nostr:   Buzz Relay ──WS(NIP-42)──→ autogent-nostr ──in-p
 autogent:         Buzz Desktop ──JSON/stdio──→ buzz-backend-autogent ──spawn──→ autogent-nostr
 
 remote:           Buzz Desktop ──JSON/stdio──→ buzz-backend-autogent-k8s ──kubectl──→ Pod: autogent-nostr
-                  config + OAuth creds travel as NIP-AE engrams (kind 30174) over the relay
+                  config + OAuth creds travel as self-encrypted NIP-78 config records (kind 30078) over the relay
 ```
 
 The ACP adapter that preceded this (`pi-acp` — an ACP server bridging `buzz-acp`
@@ -161,7 +161,7 @@ resolved configuration.
 | `AUTOGENT_MODEL` | pi's default | e.g. `anthropic/claude-sonnet-4-5` |
 | `AUTOGENT_THINKING` | pi's default | Thinking level |
 | `AUTOGENT_TOOLS` / `AUTOGENT_EXCLUDE_TOOLS` | — | Tool allow/deny lists |
-| `AUTOGENT_EXTENSIONS` | — | Comma-separated pi extension sources (paths or `npm:`/`git:`). On k8s deploys the list comes from the deploy profile (interactive `autogent` CLI) via the core engram; this env var overrides it |
+| `AUTOGENT_EXTENSIONS` | — | Comma-separated pi extension sources (paths or `npm:`/`git:`). On k8s deploys the list comes from the deploy profile (interactive `autogent` CLI) via the core config record; this env var overrides it |
 | `AUTOGENT_READ_ROOTS` / `AUTOGENT_WRITE_ROOTS` | cwd | Filesystem sandbox roots |
 | `AUTOGENT_COMMAND_DENYLIST` | — | Refused bash substrings |
 | `AUTOGENT_MAX_CONCURRENT_TURNS` | `4` | Channels running a turn at once |
@@ -316,10 +316,15 @@ The shape of it:
 - **Relay-first bootstrap.** The cluster holds exactly one secret — the
   bootstrap triple (`AUTOGENT_NSEC`, `AUTOGENT_RELAY_URL`, `AUTOGENT_AUTH_TAG`).
   Everything else — model, prompt, respond-to policy, the Anthropic OAuth
-  credential — lives on the relay as NIP-44-encrypted NIP-AE engrams
-  (kind `30174`, slugs `core` and `mem/provider-auth`) and is read by the agent
-  at boot and hot-applied on change. Missing heads ⇒ the agent starts
-  *degraded*: visible, stoppable, refusing prompts.
+  credential — lives on the relay as NIP-78 config records (kind `30078`,
+  slugs `core` and `mem/provider-auth`): addressable events signed by the
+  agent key, NIP-44-encrypted to *itself*, with HMAC-derived `d` tags. Only
+  holders of the agent nsec (the agent and the owner-side deploy tooling) can
+  read, address or write them, and nothing on the wire links them to the
+  owner pubkey — they carry no `p` tag and no NIP-OA auth tag. The agent
+  reads them at boot and hot-applies changes; `autogent-nostr config publish`
+  pushes a new config version without a redeploy. Missing heads ⇒ the agent
+  starts *degraded*: visible, stoppable, refusing prompts.
 - **No management channel to the node.** Status is presence on the relay,
   stop is owner `!shutdown`, lifetime is bounded by the in-harness
   `exit-after-inactivity` timer, restart-on-crash is `restartPolicy`.
@@ -333,7 +338,7 @@ The shape of it:
   is bound to the profile on first deploy, which also adopts the profile's
   OAuth credential under the one-account-one-agent rule.
 - **Credentials** are captured by the wizard's login step (pi's OAuth flow) and
-  published as the provider-auth engram at deploy. `autogent-nostr auth login
+  published as the provider-auth record at deploy. `autogent-nostr auth login
   --agent <pubkey>` remains the per-identity escape hatch. The agent writes
   refreshed tokens back, so a Pod recreated with an empty PVC recovers them
   from the relay.
