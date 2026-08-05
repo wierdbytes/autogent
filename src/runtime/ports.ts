@@ -349,6 +349,7 @@ export interface SessionRegistryPort {
     appendSystemPrompt?: string;
     tools?: string[];
     excludeTools?: string[];
+    extensions?: string[];
   }): Promise<void>;
   /** Drops the in-memory session; the transcript on disk survives. */
   release(channelId: string): Promise<void>;

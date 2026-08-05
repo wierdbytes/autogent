@@ -13,7 +13,6 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { createInterface } from "node:readline/promises";
 import { EngramClient } from "../nostr/engram-client.js";
 import { createEventBuilder } from "../nostr/event-builder.js";
 import { PROVIDER_AUTH_SLUG } from "../nostr/nip-ae.js";
@@ -24,6 +23,7 @@ import { KIND } from "../nostr/types.js";
 import { systemClock } from "../runtime/clock.js";
 import { nullLogger } from "../runtime/logger.js";
 import { readAgentNsecFromKeyring } from "./keyring.js";
+import { runOAuthLogin } from "./oauth.js";
 import {
   agentAuthPath,
   ensureAgentAuthDir,
@@ -37,48 +37,6 @@ interface AuthFlags {
   agent?: string;
   relay?: string;
   nsecFile?: string;
-}
-
-/* -------------------------------------------------------------------------- */
-/* OAuth flow                                                                 */
-/* -------------------------------------------------------------------------- */
-
-interface SdkAuthModule {
-  ModelRuntime: {
-    create(options: { authPath: string }): Promise<{
-      login(
-        providerId: string,
-        type: "oauth",
-        interaction: {
-          prompt(prompt: { type: string; message: string }): Promise<string>;
-          notify(event: Record<string, unknown>): void;
-        },
-      ): Promise<unknown>;
-    }>;
-  };
-}
-
-async function runOAuthLogin(authPath: string): Promise<void> {
-  const sdk = (await import("@earendil-works/pi-coding-agent")) as unknown as SdkAuthModule;
-  const runtime = await sdk.ModelRuntime.create({ authPath });
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    await runtime.login("anthropic", "oauth", {
-      prompt: async (prompt) => (await rl.question(`${prompt.message}\n> `)).trim(),
-      notify: (event) => {
-        if (event["type"] === "auth_url") {
-          process.stdout.write(`\nOpen this URL to authorise:\n  ${String(event["url"])}\n`);
-          if (event["instructions"]) process.stdout.write(`${String(event["instructions"])}\n`);
-          return;
-        }
-        if (event["type"] === "info" || event["type"] === "progress") {
-          process.stdout.write(`${String(event["message"])}\n`);
-        }
-      },
-    });
-  } finally {
-    rl.close();
-  }
 }
 
 /* -------------------------------------------------------------------------- */

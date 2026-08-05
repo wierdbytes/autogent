@@ -56,7 +56,11 @@ function listOf(value: string | undefined): string[] | undefined {
  * Derives the core-engram config from the payload (`launch.env` never reaches
  * the Pod — this projection is how the desktop's effective config travels).
  */
-export function buildCoreConfig(payload: DeployPayload, inactivitySeconds: number): CoreConfigV1 {
+export function buildCoreConfig(
+  payload: DeployPayload,
+  inactivitySeconds: number,
+  profileExtensions: string[] = [],
+): CoreConfigV1 {
   const env = effectiveEnv(payload);
   const config: CoreConfigV1 = { v: 1 };
 
@@ -77,6 +81,13 @@ export function buildCoreConfig(payload: DeployPayload, inactivitySeconds: numbe
   if (include || exclude) {
     config.tools = { ...(include ? { include } : {}), ...(exclude ? { exclude } : {}) };
   }
+
+  // Per-agent env from the Desktop wins over the registry profile, mirroring
+  // the model/tools tiers above.
+  const extensions =
+    listOf(env["AUTOGENT_EXTENSIONS"]) ??
+    (profileExtensions.length > 0 ? profileExtensions : undefined);
+  if (extensions) config.extensions = extensions;
 
   const maxConcurrent = numberOf(env["AUTOGENT_MAX_CONCURRENT_TURNS"] ?? env["BUZZ_ACP_AGENTS"]);
   const contextLimit = numberOf(env["AUTOGENT_CONTEXT_MESSAGE_LIMIT"]);
@@ -110,6 +121,8 @@ export function buildPodEnv(payload: DeployPayload): Record<string, string> {
 export interface PublishEngramsInput {
   payload: DeployPayload;
   inactivitySeconds: number;
+  /** From the deploy profile; overridden by `AUTOGENT_EXTENSIONS` in the payload env. */
+  extensions?: string[];
   /** Raw auth.json bytes from the owner-side store. */
   providerAuthJson: string;
 }
@@ -133,7 +146,7 @@ export async function publishDeployEngrams(input: PublishEngramsInput): Promise<
     await relay.connect();
     const engrams = new EngramClient({ relay, signer, builder, clock: systemClock });
 
-    const core = buildCoreConfig(payload, input.inactivitySeconds);
+    const core = buildCoreConfig(payload, input.inactivitySeconds, input.extensions ?? []);
     await engrams.publish(CORE_SLUG, { slug: CORE_SLUG, profile: JSON.stringify(core) });
     await engrams.publish(PROVIDER_AUTH_SLUG, {
       slug: PROVIDER_AUTH_SLUG,

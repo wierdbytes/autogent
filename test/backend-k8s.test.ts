@@ -53,6 +53,14 @@ describe("provider_config", () => {
     );
   });
 
+  it("parses extensions from a comma-separated flat scalar", () => {
+    expect(config({ extensions: "npm:@wierdbytes/pi-anthropic, npm:@acme/x" }).extensions).toEqual([
+      "npm:@wierdbytes/pi-anthropic",
+      "npm:@acme/x",
+    ]);
+    expect(config().extensions).toEqual([]);
+  });
+
   it("accepts 0 as the legal indefinite lifetime", () => {
     expect(config({ inactivity_seconds: 0 }).inactivitySeconds).toBe(0);
   });
@@ -177,13 +185,38 @@ describe("core-engram derivation from the payload", () => {
     const minted = mintAgent({ model: "anthropic/base" });
     const launch = minted.agent["launch"] as Record<string, unknown>;
     launch["policy_env"] = { BUZZ_ACP_MODEL: "anthropic/policy", BUZZ_ACP_AGENTS: "2" };
-    launch["env"] = { AUTOGENT_THINKING: "high", AUTOGENT_CONTEXT_MESSAGE_LIMIT: "6" };
+    launch["env"] = {
+      AUTOGENT_THINKING: "high",
+      AUTOGENT_CONTEXT_MESSAGE_LIMIT: "6",
+      AUTOGENT_EXTENSIONS: "npm:@wierdbytes/pi-anthropic, npm:@acme/pi-extra",
+    };
     const payload = parseDeployPayload(minted.agent);
     const core = buildCoreConfig(payload, 0);
     expect(core.model).toBe("anthropic/policy");
     expect(core.thinking).toBe("high");
+    expect(core.extensions).toEqual(["npm:@wierdbytes/pi-anthropic", "npm:@acme/pi-extra"]);
     expect(core.scheduler).toEqual({ max_concurrent_turns: 2, context_message_limit: 6 });
     expect(core.inactivity_exit_sec).toBe(0);
+  });
+
+  it("takes extensions from the profile, letting payload env override", () => {
+    const minted = mintAgent();
+    const payload = parseDeployPayload(minted.agent);
+
+    const fromProfile = buildCoreConfig(payload, 0, ["npm:@wierdbytes/pi-anthropic"]);
+    expect(fromProfile.extensions).toEqual(["npm:@wierdbytes/pi-anthropic"]);
+
+    const silent = buildCoreConfig(payload, 0);
+    expect(silent.extensions).toBeUndefined();
+
+    const envMinted = mintAgent();
+    (envMinted.agent["launch"] as Record<string, unknown>)["env"] = {
+      AUTOGENT_EXTENSIONS: "npm:@acme/override",
+    };
+    const overridden = buildCoreConfig(parseDeployPayload(envMinted.agent), 0, [
+      "npm:@wierdbytes/pi-anthropic",
+    ]);
+    expect(overridden.extensions).toEqual(["npm:@acme/override"]);
   });
 
   it("passes only the non-secret allowlist into the Pod env", () => {

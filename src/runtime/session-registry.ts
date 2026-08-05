@@ -205,14 +205,18 @@ export class SessionRegistry implements SessionRegistryPort {
 
     const model = config.model ? await this.#resolveModel(config.model) : undefined;
 
-    // The owner's extra system prompt travels through a resource loader; the
-    // SDK has no direct `appendSystemPrompt` option on createAgentSession.
+    // The owner's extra system prompt and extension sources travel through a
+    // resource loader; createAgentSession has no direct option for either.
+    // Extension sources may be `npm:`/`git:` specifiers — the loader's package
+    // manager resolves (and installs) them.
     let resourceLoader: { reload(): Promise<void> } | undefined;
-    if (config.appendSystemPrompt && sdk.DefaultResourceLoader) {
+    const extensions = config.extensions ?? [];
+    if ((config.appendSystemPrompt || extensions.length > 0) && sdk.DefaultResourceLoader) {
       resourceLoader = new sdk.DefaultResourceLoader({
         cwd: config.cwd,
         agentDir: config.agentDir,
-        appendSystemPrompt: [config.appendSystemPrompt],
+        ...(config.appendSystemPrompt ? { appendSystemPrompt: [config.appendSystemPrompt] } : {}),
+        ...(extensions.length > 0 ? { additionalExtensionPaths: extensions } : {}),
       });
       await resourceLoader.reload();
     }

@@ -113,6 +113,16 @@ export async function ensureAgentAuthDir(agentPubkey: string, root = ownerAuthRo
   return agentAuthPath(agentPubkey, root);
 }
 
+/** Writes the per-agent credential file (0600, atomic). */
+export async function writeAgentAuth(
+  agentPubkey: string,
+  authJson: string,
+  root = ownerAuthRoot(),
+): Promise<void> {
+  const path = await ensureAgentAuthDir(agentPubkey, root);
+  await writeFileAtomic(path, authJson, 0o600);
+}
+
 /**
  * Enforces the 1:1 account↔agent rule before recording a binding.
  * Returns the conflicting binding when the account is already taken.

@@ -34,6 +34,12 @@ export interface PiConfig {
   excludeTools?: string[];
   /** Extra system prompt appended to Pi's own. */
   appendSystemPrompt?: string;
+  /**
+   * Extension sources loaded into every session, on top of whatever the
+   * agentDir settings already provide. Accepts paths and `npm:`/`git:`
+   * specifiers (resolved by Pi's package manager).
+   */
+  extensions?: string[];
 }
 
 export interface SecurityConfig {
@@ -137,7 +143,7 @@ export function defaultConfig(): AgentConfig {
     channels: [],
     presence: { enabled: true, heartbeatSec: 60 },
     profile: { name: "Pi Agent", about: "Autonomous Pi SDK agent" },
-    pi: { cwd: process.cwd() },
+    pi: { cwd: process.cwd(), extensions: [] },
     security: {
       respondTo: "owner-only",
       allowlist: [],
@@ -225,6 +231,7 @@ export function applyEnv(base: AgentConfig, env = process.env): AgentConfig {
   next.pi.tools = envList("AUTOGENT_TOOLS") ?? next.pi.tools;
   next.pi.excludeTools = envList("AUTOGENT_EXCLUDE_TOOLS") ?? next.pi.excludeTools;
   next.pi.appendSystemPrompt = envString("AUTOGENT_SYSTEM_PROMPT") ?? next.pi.appendSystemPrompt;
+  next.pi.extensions = envList("AUTOGENT_EXTENSIONS") ?? next.pi.extensions;
 
   next.scheduler.maxConcurrentTurns =
     envNumber("AUTOGENT_MAX_CONCURRENT_TURNS") ?? next.scheduler.maxConcurrentTurns;

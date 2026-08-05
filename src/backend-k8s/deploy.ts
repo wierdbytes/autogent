@@ -15,6 +15,7 @@
 import type { DeployPayload } from "../backend/payload.js";
 import { fail } from "../backend/wire.js";
 import { readAgentAuth } from "../owner-auth/store.js";
+import { adoptProfileCredential } from "../registry/profiles.js";
 import type { K8sProviderConfig } from "./config.js";
 import { buildPodEnv, publishDeployEngrams } from "./engrams.js";
 import { apply, deleteAndWait, getJson, listJson, type KubectlOptions } from "./kubectl.js";
@@ -37,6 +38,11 @@ export interface K8sDeployInput {
   config: K8sProviderConfig;
   /** The original bech32/hex nsec, for the Secret. */
   nsec: string;
+  /**
+   * Deploy-profile name, when the deploy came through the registry: its
+   * wizard-captured OAuth credential is adopted for the agent on first deploy.
+   */
+  profileName?: string;
   /** Injected in tests. */
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -55,11 +61,26 @@ export async function deployToK8s(input: K8sDeployInput): Promise<K8sDeployOutco
 
   // 1. Credentials first: deploying an agent that can never authenticate to
   //    its model provider is refused before any object exists (plan §4.3.3).
-  const providerAuthJson = await readAgentAuth(payload.agentPubkey);
+  //    First deploy of a registry profile adopts the credential its wizard
+  //    login captured, binding it to the pubkey the payload just revealed.
+  let providerAuthJson = await readAgentAuth(payload.agentPubkey);
+  if (providerAuthJson === null && input.profileName !== undefined) {
+    const adoption = await adoptProfileCredential(input.profileName, payload.agentPubkey);
+    if (adoption.state === "conflict") {
+      fail(
+        `the OAuth account of profile '${input.profileName}' is already bound to agent ` +
+          `${adoption.conflict.agentPubkey.slice(0, 12)}… — one account drives exactly one ` +
+          "agent; re-run the login step in the `autogent` CLI with a different account",
+      );
+    }
+    if (adoption.state === "adopted") providerAuthJson = adoption.authJson;
+  }
   if (providerAuthJson === null) {
     fail(
-      `no provider credentials for agent ${payload.agentPubkey.slice(0, 12)}… — run ` +
-        `'autogent-nostr auth login --agent ${payload.agentPubkey}' on this machine first`,
+      `no provider credentials for agent ${payload.agentPubkey.slice(0, 12)}… — ` +
+        (input.profileName !== undefined
+          ? `profile '${input.profileName}' has no stored login; re-run the login step in the interactive \`autogent\` CLI`
+          : `run 'autogent-nostr auth login --agent ${payload.agentPubkey}' on this machine first`),
     );
   }
 
@@ -67,6 +88,7 @@ export async function deployToK8s(input: K8sDeployInput): Promise<K8sDeployOutco
   await publishDeployEngrams({
     payload,
     inactivitySeconds: config.inactivitySeconds,
+    extensions: config.extensions,
     providerAuthJson,
   });
 

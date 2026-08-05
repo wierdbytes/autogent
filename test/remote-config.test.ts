@@ -13,6 +13,7 @@ describe("parseCoreConfig", () => {
         respond_to: "allowlist",
         respond_to_allowlist: ["a".repeat(64)],
         tools: { include: ["read", "bash"], exclude: ["write"] },
+        extensions: ["npm:@wierdbytes/pi-anthropic", "npm:@acme/pi-extra"],
         scheduler: { max_concurrent_turns: 2, context_message_limit: 6 },
         inactivity_exit_sec: 7200,
       }),
@@ -23,8 +24,17 @@ describe("parseCoreConfig", () => {
       model: "anthropic/claude-sonnet-4-5",
       thinking: "high",
       respond_to: "allowlist",
+      extensions: ["npm:@wierdbytes/pi-anthropic", "npm:@acme/pi-extra"],
       inactivity_exit_sec: 7200,
     });
+  });
+
+  it("rejects a non-string-list extensions field", () => {
+    const { config, problems } = parseCoreConfig(
+      JSON.stringify({ v: 1, extensions: ["ok", 42] }),
+    );
+    expect(config).toBeNull();
+    expect(problems.join()).toMatch(/extensions/);
   });
 
   it("accepts a minimal document and ignores unknown keys", () => {
@@ -86,6 +96,15 @@ describe("applyCoreConfig", () => {
     expect(next.scheduler.contextMessageLimit).toBe(base.scheduler.contextMessageLimit);
     // and the base object is untouched
     expect(base.pi.model).toBe("anthropic/from-env");
+  });
+
+  it("replaces the extension list and keeps the base default when silent", () => {
+    const base = defaultConfig();
+    const replaced = applyCoreConfig(base, { v: 1, extensions: ["npm:@acme/pi-extra"] });
+    expect(replaced.pi.extensions).toEqual(["npm:@acme/pi-extra"]);
+
+    const silent = applyCoreConfig(base, { v: 1 });
+    expect(silent.pi.extensions).toEqual(base.pi.extensions);
   });
 
   it("overrides the respond-to surface atomically", () => {

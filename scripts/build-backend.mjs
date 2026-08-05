@@ -17,7 +17,7 @@
  */
 
 import { build } from "esbuild";
-import { readFileSync } from "node:fs";
+import { chmodSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -92,9 +92,10 @@ const providers = [
 ];
 
 for (const provider of providers) {
+  const outfile = join(root, "dist", "backend", provider.out);
   await build({
     entryPoints: [provider.entry],
-    outfile: join(root, "dist", "backend", provider.out),
+    outfile,
     bundle: true,
     platform: "node",
     format: "cjs",
@@ -107,5 +108,13 @@ for (const provider of providers) {
       __AUTOGENT_AGENT_FALLBACK__: JSON.stringify(agentFallback),
     },
   });
+  // esbuild writes with the default 0644 (or preserves a stale mode when
+  // overwriting); the `bin` entries and `backend:install` symlinks need the
+  // bundle itself to be executable, so set it explicitly every build.
+  chmodSync(outfile, 0o755);
   process.stdout.write(`built dist/backend/${provider.out}\n`);
 }
+
+// tsc emits the interactive CLI without the exec bit; the `autogent` bin and
+// the backend:install symlink both need it.
+chmodSync(join(root, "dist", "interactive", "cli.js"), 0o755);

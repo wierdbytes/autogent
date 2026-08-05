@@ -1,0 +1,512 @@
+#!/usr/bin/env node
+/**
+ * `autogent` — the interactive owner-side registry CLI.
+ *
+ * The redesigned creation flow: agents are configured *here* first — a wizard
+ * collects every substrate parameter (kube context, namespace, image, storage,
+ * inactivity bound) and runs the mandatory pi/Anthropic OAuth login — and the
+ * resulting deploy profile lands in the registry that Buzz Desktop's provider
+ * form renders as a drop-down. The GUI keeps the minimal surface: it only
+ * picks a profile; everything else is configured through this CLI.
+ *
+ * Identity is deliberately *not* created here: the Nostr keypair and the
+ * NIP-OA attestation are minted by Buzz Desktop when the agent record is
+ * added there (remote-agents.md). A profile shows as "deployed" once the
+ * first deploy has bound that identity to it.
+ */
+
+import { realpathSync } from "node:fs";
+import { access } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
+import * as p from "@clack/prompts";
+import {
+  DEFAULT_IMAGE,
+  DEFAULT_INACTIVITY_SECONDS,
+  DEFAULT_NAMESPACE,
+  DEFAULT_STORAGE_SIZE,
+  NAMESPACE_RE,
+  QUANTITY_RE,
+  providerConfigFromProfile,
+} from "../backend-k8s/config.js";
+import { podVerdict } from "../backend-k8s/deploy.js";
+import { getJson, kubectl } from "../backend-k8s/kubectl.js";
+import { podName } from "../backend-k8s/names.js";
+import { runOAuthLogin } from "../owner-auth/oauth.js";
+import {
+  PROFILE_NAME_RE,
+  ensureProfileAuthDir,
+  profileAuthPath,
+  readProfiles,
+  removeProfile,
+  saveProfile,
+  type DeployProfile,
+} from "../registry/profiles.js";
+
+/* -------------------------------------------------------------------------- */
+/* Small helpers                                                              */
+/* -------------------------------------------------------------------------- */
+
+function cancelled(value: unknown): value is symbol {
+  return p.isCancel(value);
+}
+
+async function hasLogin(profile: DeployProfile): Promise<boolean> {
+  try {
+    await access(profileAuthPath(profile.name));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function deployedHint(profile: DeployProfile, loggedIn: boolean): string {
+  const parts: string[] = [];
+  if (profile.agentPubkey !== null) {
+    const when =
+      profile.lastDeployedAt !== null
+        ? ` @ ${new Date(profile.lastDeployedAt).toISOString().slice(0, 16).replace("T", " ")}`
+        : "";
+    parts.push(`deployed ${profile.agentPubkey.slice(0, 12)}…${when}`);
+  } else {
+    parts.push("not deployed");
+  }
+  if (!loggedIn) parts.push("⚠ no login");
+  return parts.join(" · ");
+}
+
+function profileDetails(profile: DeployProfile, loggedIn: boolean): string {
+  return [
+    `kube context:  ${profile.kubeContext ?? "(current)"}`,
+    `namespace:     ${profile.namespace}`,
+    `image:         ${profile.image}`,
+    `storage:       ${profile.storageSize}${profile.storageClass ? ` (${profile.storageClass})` : " (default class)"}`,
+    `extensions:    ${profile.extensions.length > 0 ? profile.extensions.join(", ") : "(none)"}`,
+    `idle timeout:  ${profile.inactivitySeconds === 0 ? "unbounded" : `${profile.inactivitySeconds}s`}`,
+    `login:         ${loggedIn ? "OAuth credential stored" : "MISSING — deploy will refuse"}`,
+    `identity:      ${profile.agentPubkey ?? "(bound at first deploy from Buzz)"}`,
+  ].join("\n");
+}
+
+/* -------------------------------------------------------------------------- */
+/* kubectl probes                                                             */
+/* -------------------------------------------------------------------------- */
+
+async function listKubeContexts(): Promise<{ contexts: string[]; current: string | null }> {
+  // `config` subcommands ignore --namespace; the wrapper adds it harmlessly
+  // and brings the augmented PATH that finds Homebrew kubectl from a GUI shell.
+  try {
+    const list = await kubectl(["config", "get-contexts", "-o", "name"], {
+      context: null,
+      namespace: "default",
+      timeoutMs: 10_000,
+    });
+    const contexts =
+      list.code === 0
+        ? list.stdout
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean)
+        : [];
+    const current = await kubectl(["config", "current-context"], {
+      context: null,
+      namespace: "default",
+      timeoutMs: 10_000,
+    });
+    return { contexts, current: current.code === 0 ? current.stdout.trim() || null : null };
+  } catch {
+    return { contexts: [], current: null };
+  }
+}
+
+async function probeProfile(profile: DeployProfile): Promise<string> {
+  if (profile.agentPubkey === null) return "not deployed";
+  try {
+    const pod = await getJson("pod", podName(profile.agentPubkey), {
+      context: profile.kubeContext,
+      namespace: profile.namespace,
+      timeoutMs: 20_000,
+    });
+    if (pod === null) return "no Pod in the cluster (stopped or reaped)";
+    const verdict = podVerdict(pod);
+    if (verdict.state === "running") return "Pod running";
+    if (verdict.state === "failed") return `Pod failed: ${verdict.reason}`;
+    return `Pod pending${verdict.reason ? `: ${verdict.reason}` : ""}`;
+  } catch (error) {
+    return `probe failed: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Wizard                                                                     */
+/* -------------------------------------------------------------------------- */
+
+interface ProfileParams {
+  kubeContext: string | null;
+  namespace: string;
+  image: string;
+  storageClass: string | null;
+  storageSize: string;
+  inactivitySeconds: number;
+  extensions: string[];
+}
+
+const DEFAULT_PARAMS: ProfileParams = {
+  kubeContext: null,
+  namespace: DEFAULT_NAMESPACE,
+  image: DEFAULT_IMAGE,
+  storageClass: null,
+  storageSize: DEFAULT_STORAGE_SIZE,
+  inactivitySeconds: DEFAULT_INACTIVITY_SECONDS,
+  extensions: [],
+};
+
+/**
+ * The parameter steps, shared by create and edit. Every step accepts Enter
+ * for the default; the kube context is a picker over the ambient kubeconfig.
+ * System prompt and model are deliberately absent — those are configured in
+ * Buzz Desktop's agent form, and duplicating a setting across two sources is
+ * how the two drift.
+ */
+async function promptParams(initial: ProfileParams): Promise<ProfileParams | null> {
+  const spinner = p.spinner();
+  spinner.start("Reading kubeconfig contexts");
+  const { contexts, current } = await listKubeContexts();
+  spinner.stop(
+    contexts.length > 0
+      ? `Found ${contexts.length} kubeconfig context(s)`
+      : "No kubeconfig contexts found (kubectl missing or empty config)",
+  );
+
+  let kubeContext: string | null;
+  if (contexts.length > 0) {
+    const currentLabel = current !== null ? `Current context (${current})` : "Current context";
+    const picked = await p.select({
+      message: "Kubernetes context",
+      initialValue: initial.kubeContext ?? "",
+      options: [
+        { value: "", label: currentLabel, hint: "default" },
+        ...contexts.map((context) => ({ value: context, label: context })),
+      ],
+    });
+    if (cancelled(picked)) return null;
+    kubeContext = picked === "" ? null : picked;
+  } else {
+    const typed = await p.text({
+      message: "Kubernetes context (empty = current context)",
+      initialValue: initial.kubeContext ?? "",
+    });
+    if (cancelled(typed)) return null;
+    kubeContext = typed.trim() === "" ? null : typed.trim();
+  }
+
+  const namespace = await p.text({
+    message: "Namespace",
+    placeholder: initial.namespace,
+    defaultValue: initial.namespace,
+    validate: (value) =>
+      !value || NAMESPACE_RE.test(value) ? undefined : "not a valid k8s namespace name",
+  });
+  if (cancelled(namespace)) return null;
+
+  const image = await p.text({
+    message: "Agent image (tag or name@sha256:…)",
+    placeholder: initial.image,
+    defaultValue: initial.image,
+  });
+  if (cancelled(image)) return null;
+
+  const extensions = await p.text({
+    message: "Pi extensions, comma-separated (npm:… / git:… / path; empty = none)",
+    placeholder: "npm:@wierdbytes/pi-anthropic",
+    initialValue: initial.extensions.join(", "),
+  });
+  if (cancelled(extensions)) return null;
+
+  const storageClass = await p.text({
+    message: "StorageClass for the agent PVC",
+    placeholder: initial.storageClass ?? "cluster default",
+    initialValue: initial.storageClass ?? "",
+  });
+  if (cancelled(storageClass)) return null;
+
+  const storageSize = await p.text({
+    message: "PVC size",
+    placeholder: initial.storageSize,
+    defaultValue: initial.storageSize,
+    validate: (value) =>
+      !value || QUANTITY_RE.test(value) ? undefined : "must look like 2Gi / 512Mi",
+  });
+  if (cancelled(storageSize)) return null;
+
+  const inactivity = await p.text({
+    message: "Idle timeout in seconds (0 = run indefinitely)",
+    placeholder: String(initial.inactivitySeconds),
+    defaultValue: String(initial.inactivitySeconds),
+    validate: (value) => {
+      if (!value) return undefined;
+      const parsed = Number(value);
+      return Number.isInteger(parsed) && parsed >= 0 ? undefined : "non-negative integer required";
+    },
+  });
+  if (cancelled(inactivity)) return null;
+
+  return {
+    kubeContext,
+    namespace: namespace.trim(),
+    image: image.trim(),
+    storageClass: storageClass.trim() === "" ? null : storageClass.trim(),
+    storageSize: storageSize.trim(),
+    inactivitySeconds: Number(inactivity),
+    extensions: extensions
+      .split(",")
+      .map((item) => item.trim())
+      .filter((item) => item !== ""),
+  };
+}
+
+/** Runs the mandatory OAuth login step. Returns false when it did not complete. */
+async function loginStep(name: string): Promise<boolean> {
+  p.log.step("Sign in to Anthropic (pi OAuth) — this credential powers the agent's model access");
+  const authPath = await ensureProfileAuthDir(name);
+  try {
+    await runOAuthLogin(authPath);
+    p.log.success("Login complete — credential stored for this profile");
+    return true;
+  } catch (error) {
+    p.log.error(`login failed: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+
+async function createWizard(existing: DeployProfile[]): Promise<void> {
+  const taken = new Set(existing.map((profile) => profile.name));
+  const name = await p.text({
+    message: "Agent profile name",
+    placeholder: "my-agent",
+    validate: (value) => {
+      if (!value || !PROFILE_NAME_RE.test(value)) {
+        return "lowercase letters, digits and dashes (max 40)";
+      }
+      if (taken.has(value)) return "a profile with this name already exists";
+      return undefined;
+    },
+  });
+  if (cancelled(name)) return;
+
+  const params = await promptParams(DEFAULT_PARAMS);
+  if (params === null) return;
+
+  const profile: DeployProfile = {
+    name,
+    createdAt: Date.now(),
+    ...params,
+    agentPubkey: null,
+    lastDeployedAt: null,
+  };
+
+  // Validate the whole thing through the deploy-time parser before login, so
+  // a bad image reference fails here and not after the OAuth dance.
+  try {
+    providerConfigFromProfile(profile);
+  } catch (error) {
+    p.log.error(error instanceof Error ? error.message : String(error));
+    return;
+  }
+
+  // Login is strictly mandatory: without it the deploy is fail-closed anyway,
+  // so an unauthenticated profile is never saved.
+  if (!(await loginStep(name))) {
+    p.log.warn("Profile was NOT created — the login step is mandatory");
+    return;
+  }
+
+  await saveProfile(profile);
+  p.note(
+    `In Buzz Desktop, add an agent with the 'autogent-k8s' backend provider\n` +
+      `and pick the profile '${name}' — that is the only provider setting left there.`,
+    `Profile '${name}' created`,
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Per-profile menu                                                           */
+/* -------------------------------------------------------------------------- */
+
+async function profileMenu(name: string): Promise<void> {
+  for (;;) {
+    const profile = (await readProfiles()).find((candidate) => candidate.name === name);
+    if (!profile) return;
+    const loggedIn = await hasLogin(profile);
+    p.note(profileDetails(profile, loggedIn), `Profile '${profile.name}'`);
+
+    const action = await p.select({
+      message: "Action",
+      options: [
+        ...(profile.agentPubkey !== null
+          ? [{ value: "status", label: "Check live status in the cluster (kubectl)" }]
+          : []),
+        { value: "edit", label: "Edit parameters" },
+        { value: "login", label: loggedIn ? "Re-run OAuth login" : "Run OAuth login (missing!)" },
+        { value: "delete", label: "Delete profile" },
+        { value: "back", label: "Back" },
+      ],
+    });
+    if (cancelled(action) || action === "back") return;
+
+    if (action === "status") {
+      const spinner = p.spinner();
+      spinner.start("Probing the cluster");
+      const status = await probeProfile(profile);
+      spinner.stop(status);
+      continue;
+    }
+
+    if (action === "edit") {
+      const params = await promptParams(profile);
+      if (params === null) continue;
+      try {
+        providerConfigFromProfile({ ...profile, ...params });
+      } catch (error) {
+        p.log.error(error instanceof Error ? error.message : String(error));
+        continue;
+      }
+      await saveProfile({ ...profile, ...params });
+      p.log.success(
+        profile.agentPubkey !== null
+          ? "Saved — takes effect on the next deploy from Buzz"
+          : "Saved",
+      );
+      continue;
+    }
+
+    if (action === "login") {
+      await loginStep(profile.name);
+      continue;
+    }
+
+    if (action === "delete") {
+      const sure = await p.confirm({
+        message:
+          profile.agentPubkey !== null
+            ? `Delete '${profile.name}'? A running Pod is NOT stopped (use !shutdown over the relay).`
+            : `Delete '${profile.name}'?`,
+        initialValue: false,
+      });
+      if (cancelled(sure) || !sure) continue;
+      await removeProfile(profile.name);
+      p.log.success(`Profile '${profile.name}' deleted`);
+      return;
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Entry                                                                      */
+/* -------------------------------------------------------------------------- */
+
+async function refreshStatuses(profiles: DeployProfile[]): Promise<void> {
+  const spinner = p.spinner();
+  spinner.start("Probing the cluster(s)");
+  const lines: string[] = [];
+  for (const profile of profiles) {
+    lines.push(`${profile.name.padEnd(20)} ${await probeProfile(profile)}`);
+  }
+  spinner.stop("Live status");
+  p.note(lines.join("\n"), "Cluster status");
+}
+
+async function mainMenu(): Promise<void> {
+  p.intro("autogent — agent registry");
+  for (;;) {
+    const profiles = await readProfiles();
+    const logins = await Promise.all(profiles.map((profile) => hasLogin(profile)));
+
+    const choice = await p.select({
+      message:
+        profiles.length > 0 ? "Agents in the registry" : "The registry is empty — create an agent",
+      options: [
+        ...profiles.map((profile, index) => ({
+          value: `profile:${profile.name}`,
+          label: profile.name,
+          hint: deployedHint(profile, logins[index] ?? false),
+        })),
+        { value: "create", label: "➕ Create a new agent" },
+        ...(profiles.some((profile) => profile.agentPubkey !== null)
+          ? [{ value: "refresh", label: "↻ Check live status (kubectl)" }]
+          : []),
+        { value: "quit", label: "Quit" },
+      ],
+    });
+    if (cancelled(choice) || choice === "quit") break;
+    if (choice === "create") await createWizard(profiles);
+    else if (choice === "refresh") await refreshStatuses(profiles);
+    else await profileMenu(choice.slice("profile:".length));
+  }
+  p.outro("done");
+}
+
+async function printList(): Promise<number> {
+  const profiles = await readProfiles();
+  if (profiles.length === 0) {
+    process.stdout.write("registry is empty — run `autogent` interactively to create an agent\n");
+    return 0;
+  }
+  for (const profile of profiles) {
+    const loggedIn = await hasLogin(profile);
+    process.stdout.write(`${profile.name}\t${deployedHint(profile, loggedIn)}\n`);
+  }
+  return 0;
+}
+
+const USAGE = `autogent — interactive agent registry for the Buzz autogent-k8s provider
+
+Usage:
+  autogent          interactive mode: list agents, create/edit/delete profiles
+  autogent list     print the registry non-interactively
+  autogent --help   this text
+
+Agents are configured here (kube context, namespace, image, pi extensions,
+storage, idle timeout + the mandatory pi/Anthropic OAuth login) and then
+selected in Buzz
+Desktop's provider form, which exposes only the profile drop-down.
+`;
+
+export async function main(argv: string[]): Promise<number> {
+  const [command] = argv;
+  if (command === "list") return printList();
+  if (command === "--help" || command === "-h" || command === "help") {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+  if (command !== undefined) {
+    process.stderr.write(`unknown command: ${command}\n\n${USAGE}`);
+    return 2;
+  }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    process.stderr.write("not a TTY — interactive mode needs a terminal; try `autogent list`\n");
+    return 2;
+  }
+  await mainMenu();
+  return 0;
+}
+
+function invokedDirectly(): boolean {
+  const entrypoint = process.argv[1];
+  if (entrypoint === undefined) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(entrypoint)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (invokedDirectly()) {
+  main(process.argv.slice(2))
+    .then((code) => {
+      process.exitCode = code;
+    })
+    .catch((error: unknown) => {
+      process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);
+      process.exitCode = 1;
+    });
+}

@@ -704,6 +704,7 @@ export class AppRuntime {
       appendSystemPrompt: next.pi.appendSystemPrompt,
       tools: next.pi.tools,
       excludeTools: next.pi.excludeTools,
+      extensions: next.pi.extensions,
     });
     this.#config = { ...next, stateDir: this.#config.stateDir, relayUrl: this.#config.relayUrl };
     this.#inactivity.arm(next.lifecycle.inactivityExitSec);

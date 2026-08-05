@@ -77,8 +77,9 @@ Buzz Desktop → Deploy. Провайдер: новый generation-Secret → з
 
 1. `az aks get-credentials …` — новый контекст в kubeconfig.
 2. Namespace + NetworkPolicy: `kubectl apply -f deploy/k8s/`.
-3. В provider_config агента: `kube_context` → AKS-контекст,
-   `storage_class` → `managed-csi` (или пусто для default).
+3. В интерактивном `autogent` (Edit parameters у профиля): kube context →
+   AKS-контекст, storage class → `managed-csi` (или пусто для default).
+   provider_config в Buzz теперь содержит только имя профиля.
 4. Redeploy. PVC-содержимое не переносится (см. «Потеря PVC» — оно и не
    нужно); при необходимости workspace переносится вручную
    (`kubectl cp` со старого кластера до удаления).

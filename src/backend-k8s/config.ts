@@ -9,6 +9,7 @@
  */
 
 import { fail } from "../backend/wire.js";
+import type { DeployProfile } from "../registry/profiles.js";
 import { DIGEST_RE } from "./resolve-image.js";
 
 export const DEFAULT_NAMESPACE = "autogent";
@@ -26,13 +27,18 @@ export interface K8sProviderConfig {
   storageSize: string;
   /** 0 is the legal "run indefinitely" (drives restartPolicy, §4.4). */
   inactivitySeconds: number;
+  /**
+   * Pi extension sources for the core engram (paths or `npm:`/`git:`). On the
+   * wire this stays a flat scalar (I2): a comma-separated string.
+   */
+  extensions: string[];
 }
 
-const NAMESPACE_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+export const NAMESPACE_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 // A tag reference: optional registry/repo path, optional `:tag`. No `@` — a
 // half-typed digest must not silently parse as a tag.
 const TAG_REF_RE = /^[a-z0-9][a-z0-9._:/-]*$/i;
-const QUANTITY_RE = /^[0-9]+(\.[0-9]+)?(Mi|Gi|Ti)$/;
+export const QUANTITY_RE = /^[0-9]+(\.[0-9]+)?(Mi|Gi|Ti)$/;
 
 function asObject(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -79,6 +85,11 @@ export function parseK8sProviderConfig(raw: unknown): K8sProviderConfig {
     inactivitySeconds = parsed;
   }
 
+  const extensions = (optionalString(object, "extensions") ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item !== "");
+
   return {
     kubeContext: optionalString(object, "kube_context"),
     namespace,
@@ -86,47 +97,68 @@ export function parseK8sProviderConfig(raw: unknown): K8sProviderConfig {
     storageClass: optionalString(object, "storage_class"),
     storageSize,
     inactivitySeconds,
+    extensions,
   };
 }
 
 /**
- * The schema rendered by Buzz Desktop's provider form. Field names are checked
- * against the I2 lint (no `secret|password|token|key|credential` words).
+ * The schema rendered by Buzz Desktop's provider form — deliberately reduced
+ * to a *single* field. All substrate settings (kube context, namespace, image,
+ * storage, inactivity bound) live on the deploy profile that the interactive
+ * `autogent` CLI creates; the GUI only picks which profile to deploy. The
+ * enum makes it a drop-down where the form supports one, and the description
+ * lists the choices where it does not. Field names remain subject to the I2
+ * lint (no `secret|password|token|key|credential` words).
+ *
+ * Defaults MAY be computed freshly per `info` call (spec §info), which is
+ * exactly what listing the registry here is.
  */
-export function k8sConfigSchema(): Record<string, unknown> {
+export function k8sConfigSchema(profileNames: string[] = []): Record<string, unknown> {
+  const agent: Record<string, unknown> = {
+    type: "string",
+    description:
+      profileNames.length > 0
+        ? `Agent profile from the autogent registry. Available: ${profileNames.join(", ")}`
+        : "Agent profile from the autogent registry — none exist yet; run the interactive `autogent` CLI on this machine to create one",
+  };
+  if (profileNames.length > 0) {
+    agent["enum"] = profileNames;
+    agent["default"] = profileNames[0];
+  }
   return {
     type: "object",
-    properties: {
-      kube_context: {
-        type: "string",
-        description: "kubeconfig context to use (empty = current context)",
-      },
-      namespace: {
-        type: "string",
-        description: `Kubernetes namespace for agent Pods (default ${DEFAULT_NAMESPACE})`,
-        default: DEFAULT_NAMESPACE,
-      },
-      image: {
-        type: "string",
-        description:
-          `Agent image tag (resolved to a digest at deploy) or name@sha256:… (default ${DEFAULT_IMAGE})`,
-        default: DEFAULT_IMAGE,
-      },
-      storage_class: {
-        type: "string",
-        description: "StorageClass for the agent's PVC (empty = cluster default; k3s: local-path)",
-      },
-      storage_size: {
-        type: "string",
-        description: `PVC size for state + workspace (default ${DEFAULT_STORAGE_SIZE})`,
-        default: DEFAULT_STORAGE_SIZE,
-      },
-      inactivity_seconds: {
-        type: "integer",
-        description: `Self-terminate after this many idle seconds; 0 = run indefinitely (default ${DEFAULT_INACTIVITY_SECONDS})`,
-        default: DEFAULT_INACTIVITY_SECONDS,
-      },
-    },
-    required: [],
+    properties: { agent },
+    required: ["agent"],
   };
+}
+
+/**
+ * The profile name from `provider_config` — the one field the GUI still owns.
+ */
+export function requestedProfileName(raw: unknown): string {
+  const object = asObject(raw) ?? {};
+  const name = optionalString(object, "agent");
+  if (name === null) {
+    fail(
+      "provider_config.agent is required — pick an agent profile from the registry " +
+        "(create one with the interactive `autogent` CLI on this machine)",
+    );
+  }
+  return name;
+}
+
+/**
+ * A registry profile is stored pre-validated, but it is still a file a human
+ * can edit; running it through the same parser keeps deploy fail-closed.
+ */
+export function providerConfigFromProfile(profile: DeployProfile): K8sProviderConfig {
+  return parseK8sProviderConfig({
+    kube_context: profile.kubeContext,
+    namespace: profile.namespace,
+    image: profile.image,
+    storage_class: profile.storageClass,
+    storage_size: profile.storageSize,
+    inactivity_seconds: profile.inactivitySeconds,
+    extensions: profile.extensions.join(","),
+  });
 }

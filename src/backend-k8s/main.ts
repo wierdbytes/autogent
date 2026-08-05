@@ -14,11 +14,13 @@ import { parseDeployPayload } from "../backend/payload.js";
 import { redactSecrets, secretsFromRequest } from "../backend/redact.js";
 import {
   errorResponse,
+  fail,
   parseRequest,
   PROTOCOL_VERSION,
   type ProviderResponse,
 } from "../backend/wire.js";
-import { k8sConfigSchema, parseK8sProviderConfig } from "./config.js";
+import { getProfile, markProfileDeployed, readProfiles } from "../registry/profiles.js";
+import { k8sConfigSchema, providerConfigFromProfile, requestedProfileName } from "./config.js";
 import { deployToK8s } from "./deploy.js";
 
 export const K8S_PROVIDER_ID = "autogent-k8s";
@@ -41,20 +43,38 @@ export async function handleRequest(input: string): Promise<ProviderResponse> {
   const request = parseRequest(input);
 
   if (request.op === "info") {
+    const profiles = await readProfiles();
     // Closed key allowlist on the desktop side — no extra fields, ever.
     return {
       ok: true,
       name: K8S_PROVIDER_ID,
       version: providerVersion(),
       protocol_version: PROTOCOL_VERSION,
-      description: "Runs the agent as a Pod on a Kubernetes cluster (ambient kubeconfig)",
-      config_schema: k8sConfigSchema(),
+      description:
+        "Runs the agent as a Pod on a Kubernetes cluster. Configure agent profiles with the interactive `autogent` CLI; pick one here.",
+      config_schema: k8sConfigSchema(profiles.map((profile) => profile.name)),
     };
   }
 
   const payload = parseDeployPayload(request.agent);
-  const config = parseK8sProviderConfig(request.provider_config);
-  const outcome = await deployToK8s({ payload, config, nsec: rawNsec(request.agent) });
+  const profileName = requestedProfileName(request.provider_config);
+  const profile = await getProfile(profileName);
+  if (profile === null) {
+    fail(
+      `unknown agent profile ${JSON.stringify(profileName)} — create it with the interactive ` +
+        "`autogent` CLI on this machine, then redeploy",
+    );
+  }
+  const config = providerConfigFromProfile(profile);
+  const outcome = await deployToK8s({
+    payload,
+    config,
+    nsec: rawNsec(request.agent),
+    profileName,
+  });
+  // Bookkeeping, not liveness (I3): best-effort — a registry write failure
+  // must not turn a successful deploy into a reported error.
+  await markProfileDeployed(profileName, payload.agentPubkey).catch(() => {});
   return { ok: true, agent_id: outcome.agentId };
 }
 

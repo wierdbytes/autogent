@@ -18,6 +18,8 @@ export interface CoreConfigV1 {
   respond_to?: RespondToMode;
   respond_to_allowlist?: string[];
   tools?: { include?: string[]; exclude?: string[] };
+  /** Pi extension sources (paths or `npm:`/`git:` specifiers), replacing the base list. */
+  extensions?: string[];
   scheduler?: { max_concurrent_turns?: number; context_message_limit?: number };
   /** 0 is a legal "run indefinitely". */
   inactivity_exit_sec?: number;
@@ -132,6 +134,9 @@ export function parseCoreConfig(profile: string): ParsedCoreConfig {
     }
   }
 
+  const extensions = optionalStringList(object, "extensions", problems);
+  if (extensions !== undefined) config.extensions = extensions;
+
   const scheduler = asObject(object["scheduler"]);
   if (object["scheduler"] !== undefined && object["scheduler"] !== null) {
     if (!scheduler) problems.push("scheduler must be an object");
@@ -174,6 +179,7 @@ export function applyCoreConfig(base: AgentConfig, core: CoreConfigV1): AgentCon
   if (core.respond_to_allowlist !== undefined) next.security.allowlist = core.respond_to_allowlist;
   if (core.tools?.include !== undefined) next.pi.tools = core.tools.include;
   if (core.tools?.exclude !== undefined) next.pi.excludeTools = core.tools.exclude;
+  if (core.extensions !== undefined) next.pi.extensions = core.extensions;
   if (core.scheduler?.max_concurrent_turns !== undefined) {
     next.scheduler.maxConcurrentTurns = core.scheduler.max_concurrent_turns;
   }

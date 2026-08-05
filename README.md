@@ -161,6 +161,7 @@ resolved configuration.
 | `AUTOGENT_MODEL` | pi's default | e.g. `anthropic/claude-sonnet-4-5` |
 | `AUTOGENT_THINKING` | pi's default | Thinking level |
 | `AUTOGENT_TOOLS` / `AUTOGENT_EXCLUDE_TOOLS` | — | Tool allow/deny lists |
+| `AUTOGENT_EXTENSIONS` | — | Comma-separated pi extension sources (paths or `npm:`/`git:`). On k8s deploys the list comes from the deploy profile (interactive `autogent` CLI) via the core engram; this env var overrides it |
 | `AUTOGENT_READ_ROOTS` / `AUTOGENT_WRITE_ROOTS` | cwd | Filesystem sandbox roots |
 | `AUTOGENT_COMMAND_DENYLIST` | — | Refused bash substrings |
 | `AUTOGENT_MAX_CONCURRENT_TURNS` | `4` | Channels running a turn at once |
@@ -322,10 +323,20 @@ The shape of it:
 - **No management channel to the node.** Status is presence on the relay,
   stop is owner `!shutdown`, lifetime is bounded by the in-harness
   `exit-after-inactivity` timer, restart-on-crash is `restartPolicy`.
-- **Credentials** come from `autogent-nostr auth login --agent <pubkey>` on the
-  owner machine (pi's OAuth flow; one account = one agent), published as the
-  provider-auth engram. The agent writes refreshed tokens back, so a Pod
-  recreated with an empty PVC recovers them from the relay.
+- **Agents are configured in the `autogent` CLI, not the GUI.** The interactive
+  `autogent` command owns the registry of *deploy profiles*: a wizard collects
+  every substrate parameter (kube context picked from the ambient kubeconfig,
+  namespace, image, storage, idle timeout — Enter accepts the default) and runs
+  the mandatory pi/Anthropic OAuth login. Buzz Desktop's provider form is
+  reduced to a single `agent` field — a drop-down over the registry. The Nostr
+  identity is still minted by Buzz Desktop when the agent record is added; it
+  is bound to the profile on first deploy, which also adopts the profile's
+  OAuth credential under the one-account-one-agent rule.
+- **Credentials** are captured by the wizard's login step (pi's OAuth flow) and
+  published as the provider-auth engram at deploy. `autogent-nostr auth login
+  --agent <pubkey>` remains the per-identity escape hatch. The agent writes
+  refreshed tokens back, so a Pod recreated with an empty PVC recovers them
+  from the relay.
 - **Relay tools** in the Pod: `channel_history`/`channel_search` (NIP-50),
   `media_get`/`media_put` (Blossom), `git_repos` + a loopback NIP-98 auth proxy
   that lets the stock `git` CLI clone/push the relay's repos without the key
@@ -338,9 +349,11 @@ Setup, in order:
 # once, on the VM:                deploy/k3s-bootstrap.sh
 # once, on the owner machine:     merge kubeconfig, rename context (script prints how)
 npm run backend:install           # links both providers into ~/.local/bin
-autogent-nostr auth login --agent <pubkey> --relay wss://…
-# then in Buzz Desktop: provider "autogent-k8s" — the image defaults to
-# ghcr.io/wierdbytes/autogent:latest (tag is resolved to a digest at deploy), Deploy
+autogent                          # interactive: create an agent profile
+                                  # (kube context, namespace, image, storage,
+                                  #  idle timeout + mandatory OAuth login)
+# then in Buzz Desktop: add an agent, provider "autogent-k8s", pick the
+# profile in the drop-down — the only provider setting left there — Deploy
 ```
 
 Manifests for the namespace and the egress NetworkPolicy are in
