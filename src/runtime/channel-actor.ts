@@ -56,8 +56,16 @@ export interface ChannelActorDeps {
   acquireSession(): Promise<AgentSessionHandle>;
   /** Starts a fresh Pi session, discarding prior context. */
   rotateSession(): Promise<AgentSessionHandle>;
-  /** Prior messages to include as context. */
-  fetchContext(event: NostrEvent, threadRootId: string): Promise<ConversationContext | null>;
+  /**
+   * Prior messages to include as context. `sessionHasHistory` lets the fetcher
+   * skip content the session already carries (its own replies, delivered
+   * triggers) instead of re-injecting it every turn.
+   */
+  fetchContext(
+    event: NostrEvent,
+    threadRootId: string,
+    opts: { sessionHasHistory: boolean },
+  ): Promise<ConversationContext | null>;
   /** Reports provider usage as Pi completes each model call. */
   observeUsage(sessionId: string, turnId: string, usage: PiUsage): void;
   /** Emits the NIP-AM metric for a finished turn. */
@@ -253,7 +261,11 @@ export class ChannelActor {
     const releaseConcurrency = (await this.deps.concurrency?.acquire()) ?? (() => {});
 
     const session = await this.#ensureSession();
-    const context_ = await this.deps.fetchContext(event, threadRootId).catch(() => null);
+    // Read before `session.prompt()` below: prompting flips `hasHistory` on a
+    // fresh session, and this turn must still see the pre-prompt state.
+    const context_ = await this.deps
+      .fetchContext(event, threadRootId, { sessionHasHistory: session.hasHistory })
+      .catch(() => null);
     const prompt = formatPrimaryPrompt({
       event,
       channel: this.#channelInfo(),

@@ -29,6 +29,7 @@ function setup(options: { session?: FakeSession; acquireSequence?: FakeSession[]
   let acquireCalls = 0;
   const usage: Array<{ turnId: string; stopReason: string }> = [];
   const observed: Array<{ sessionId: string; turnId: string }> = [];
+  const contextCalls: Array<{ eventId: string; sessionHasHistory: boolean }> = [];
   let turnSeq = 0;
 
   const output = new OutputRouter({
@@ -54,7 +55,10 @@ function setup(options: { session?: FakeSession; acquireSequence?: FakeSession[]
         ? (options.acquireSequence[Math.min(acquireCalls++, options.acquireSequence.length - 1)] ?? session)
         : session,
     rotateSession: async () => session,
-    fetchContext: async () => null,
+    fetchContext: async (event, _threadRootId, opts) => {
+      contextCalls.push({ eventId: event.id, sessionHasHistory: opts.sessionHasHistory });
+      return null;
+    },
     observeUsage: (sessionId, turnId) => observed.push({ sessionId, turnId }),
     publishUsage: (turn, _sessionId, stopReason) => usage.push({ turnId: turn.turnId, stopReason }),
     newTurnId: () => `turn-${++turnSeq}`,
@@ -62,7 +66,17 @@ function setup(options: { session?: FakeSession; acquireSequence?: FakeSession[]
     maxTurnDurationMs: 7_200_000,
   };
 
-  return { actor: new ChannelActor(deps), clock, state, telemetry, session, output, usage, observed };
+  return {
+    actor: new ChannelActor(deps),
+    clock,
+    state,
+    telemetry,
+    session,
+    output,
+    usage,
+    observed,
+    contextCalls,
+  };
 }
 
 /** The `e` tag carrying the given NIP-10 marker. */
@@ -103,6 +117,28 @@ describe("primary turn", () => {
     await actor.drain();
 
     expect(state.outbox.publishedChatEvents()).toHaveLength(0);
+  });
+});
+
+describe("context fetching", () => {
+  it("passes the session's pre-prompt history state into fetchContext", async () => {
+    const { actor, session, contextCalls } = setup();
+    const first = chatEvent({ channelId: CHANNEL, content: "first" });
+    actor.submit({ event: first, promptTag: "@mention" });
+    await actor.drain();
+
+    // The fresh session had no history when the first turn fetched context.
+    expect(contextCalls).toEqual([{ eventId: first.id, sessionHasHistory: false }]);
+
+    session.emit({ type: "agent_settled" });
+    await actor.drain();
+
+    const second = chatEvent({ channelId: CHANNEL, content: "second" });
+    actor.submit({ event: second, promptTag: "@mention" });
+    await actor.drain();
+
+    // After the first prompt the session carries the conversation itself.
+    expect(contextCalls[1]).toEqual({ eventId: second.id, sessionHasHistory: true });
   });
 });
 

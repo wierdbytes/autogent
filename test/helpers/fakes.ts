@@ -228,6 +228,8 @@ export class FakeSession implements AgentSessionHandle {
   contextWindow: number | undefined = 200_000;
   isStreaming = false;
   isIdle = true;
+  /** Mirrors the real adapter: flips on the first prompt, settable for tests. */
+  hasHistory = false;
   readonly prompts: string[] = [];
   readonly steers: string[] = [];
   aborted = 0;
@@ -241,6 +243,7 @@ export class FakeSession implements AgentSessionHandle {
 
   async prompt(text: string): Promise<void> {
     this.prompts.push(text);
+    this.hasHistory = true;
     this.isStreaming = true;
     this.isIdle = false;
     await new Promise<void>(() => {});

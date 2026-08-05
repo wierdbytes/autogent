@@ -38,7 +38,11 @@ export interface ChannelRegistryDeps {
   sessions: SessionRegistryPort;
   clock: Clock;
   logger: Logger;
-  fetchContext(event: NostrEvent, threadRootId: string): Promise<ConversationContext | null>;
+  fetchContext(
+    event: NostrEvent,
+    threadRootId: string,
+    opts: { sessionHasHistory: boolean },
+  ): Promise<ConversationContext | null>;
   observeUsage(sessionId: string, turnId: string, usage: PiUsage): void;
   publishUsage(turn: TurnContext, sessionId: string | null, stopReason: string): void;
   newTurnId(): string;
@@ -104,7 +108,8 @@ export class ChannelRegistry {
       logger: this.deps.logger.child({ channelId: descriptor.channelId }),
       acquireSession: () => this.deps.sessions.acquire(descriptor.channelId),
       rotateSession: () => this.deps.sessions.rotate(descriptor.channelId),
-      fetchContext: (event, threadRootId) => this.deps.fetchContext(event, threadRootId),
+      fetchContext: (event, threadRootId, opts) =>
+        this.deps.fetchContext(event, threadRootId, opts),
       observeUsage: (sessionId, turnId, usage) => this.deps.observeUsage(sessionId, turnId, usage),
       publishUsage: (turn, sessionId, stopReason) =>
         this.deps.publishUsage(turn, sessionId, stopReason),

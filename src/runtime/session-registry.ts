@@ -62,11 +62,16 @@ interface SdkModule {
 class PiSessionAdapter implements AgentSessionHandle {
   readonly #router = new PiEventRouter();
   #disposed = false;
+  readonly #resumed: boolean;
+  #prompted = false;
 
   constructor(
     private readonly session: SdkSession,
     private readonly resolveModel: (id: string) => Promise<unknown>,
-  ) {}
+    options: { resumed: boolean },
+  ) {
+    this.#resumed = options.resumed;
+  }
 
   get sessionId(): string {
     return this.session.sessionId;
@@ -92,7 +97,17 @@ class PiSessionAdapter implements AgentSessionHandle {
       : undefined;
   }
 
+  /**
+   * A resumed transcript has memory from the start; a fresh one only after its
+   * first prompt. Steering is not tracked separately because it can only
+   * happen mid-turn — i.e. after a prompt already flipped the flag.
+   */
+  get hasHistory(): boolean {
+    return this.#resumed || this.#prompted;
+  }
+
   prompt(text: string): Promise<void> {
+    this.#prompted = true;
     // Prompt templates are disabled: the text contains untrusted user content,
     // and template expansion there would be an injection vector (plan §10.2).
     return this.session.prompt(text, { source: "rpc", expandPromptTemplates: false });
@@ -222,6 +237,7 @@ export class SessionRegistry implements SessionRegistryPort {
     const config = this.#config;
     const record = this.deps.channels.get(this.deps.relayId, channelId);
     const priorPath = options.fresh ? null : record?.piSessionPath;
+    const reused = Boolean(priorPath);
 
     const sessionManager = priorPath
       ? sdk.SessionManager.open(priorPath)
@@ -299,10 +315,10 @@ export class SessionRegistry implements SessionRegistryPort {
     this.deps.logger.info("pi session ready", {
       channelId,
       sessionId: session.sessionId,
-      reused: Boolean(priorPath),
+      reused,
     });
 
-    return new PiSessionAdapter(session, (id) => this.#resolveModel(id));
+    return new PiSessionAdapter(session, (id) => this.#resolveModel(id), { resumed: reused });
   }
 
   /** Accepts `provider/model` and bare model ids. */
