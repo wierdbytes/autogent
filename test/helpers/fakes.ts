@@ -222,6 +222,7 @@ export class FakeSession implements AgentSessionHandle {
   readonly steers: string[] = [];
   aborted = 0;
   steerRejects = false;
+  disposed = false;
   #listeners = new Set<(event: PiEvent) => void>();
 
   constructor(sessionId = "session-1") {
@@ -252,6 +253,7 @@ export class FakeSession implements AgentSessionHandle {
     this.model = model;
   }
   dispose(): void {
+    this.disposed = true;
     this.#listeners.clear();
   }
 

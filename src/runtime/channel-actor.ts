@@ -482,6 +482,14 @@ export class ChannelActor {
   /* ------------------------------------------------------------------ */
 
   async #ensureSession(): Promise<AgentSessionHandle> {
+    if (this.#session && this.#session.disposed) {
+      // A config push disposed the cached session out from under the actor;
+      // prompting into it would hang the turn forever. Drop the stale handle
+      // and re-acquire.
+      this.#unsubscribe?.();
+      this.#unsubscribe = null;
+      this.#session = null;
+    }
     if (this.#session) return this.#session;
     const session = await this.deps.acquireSession();
     this.#session = session;

@@ -20,12 +20,13 @@ import {
 
 const CHANNEL = "11111111-2222-3333-4444-555555555555";
 
-function setup(options: { session?: FakeSession } = {}) {
+function setup(options: { session?: FakeSession; acquireSequence?: FakeSession[] } = {}) {
   const clock = new FakeClock();
   const state = fakeState();
   const telemetry = new FakeTelemetry();
   const outbox = state.outbox;
-  const session = options.session ?? new FakeSession();
+  const session = options.session ?? options.acquireSequence?.[0] ?? new FakeSession();
+  let acquireCalls = 0;
   const usage: Array<{ turnId: string; stopReason: string }> = [];
   const observed: Array<{ sessionId: string; turnId: string }> = [];
   let turnSeq = 0;
@@ -48,7 +49,10 @@ function setup(options: { session?: FakeSession } = {}) {
     output,
     clock,
     logger: nullLogger,
-    acquireSession: async () => session,
+    acquireSession: async () =>
+      options.acquireSequence
+        ? (options.acquireSequence[Math.min(acquireCalls++, options.acquireSequence.length - 1)] ?? session)
+        : session,
     rotateSession: async () => session,
     fetchContext: async () => null,
     observeUsage: (sessionId, turnId) => observed.push({ sessionId, turnId }),
@@ -324,6 +328,30 @@ describe("turn lifecycle", () => {
     await actor.drain();
 
     expect(session.steers).toHaveLength(1);
+  });
+
+  it("re-acquires a session when the cached one was disposed by a config push", async () => {
+    const first = new FakeSession("session-old");
+    const second = new FakeSession("session-new");
+    const { actor } = setup({ acquireSequence: [first, second] });
+
+    actor.submit({ event: chatEvent({ channelId: CHANNEL, content: "one" }), promptTag: "@mention" });
+    await actor.drain();
+    expect(first.prompts).toHaveLength(1);
+
+    first.emit({ type: "agent_end", willRetry: false });
+    first.emit({ type: "agent_settled" });
+    await actor.drain();
+    expect(actor.activeTurn).toBeNull();
+
+    // A hot config update disposes the cached session out from under the actor.
+    first.dispose();
+
+    actor.submit({ event: chatEvent({ channelId: CHANNEL, content: "two" }), promptTag: "@mention" });
+    await actor.drain();
+
+    expect(second.prompts).toHaveLength(1);
+    expect(first.prompts).toHaveLength(1);
   });
 
   it("does not let a cancelled run's trailing settle kill the next turn", async () => {

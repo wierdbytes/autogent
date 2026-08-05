@@ -302,6 +302,8 @@ export interface AgentSessionHandle {
   waitForIdle(): Promise<void>;
   subscribe(listener: (event: PiEvent) => void): () => void;
   setModel(model: string): Promise<void>;
+  /** True once the registry disposed the session; stale caches must re-acquire. */
+  readonly disposed: boolean;
   dispose(): void;
 }
 

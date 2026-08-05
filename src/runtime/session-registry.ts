@@ -61,6 +61,7 @@ interface SdkModule {
  */
 class PiSessionAdapter implements AgentSessionHandle {
   readonly #router = new PiEventRouter();
+  #disposed = false;
 
   constructor(
     private readonly session: SdkSession,
@@ -109,7 +110,11 @@ class PiSessionAdapter implements AgentSessionHandle {
     if (!resolved) throw new Error(`unknown model: ${model}`);
     await this.session.setModel(resolved);
   }
+  get disposed(): boolean {
+    return this.#disposed;
+  }
   dispose(): void {
+    this.#disposed = true;
     this.session.dispose();
   }
 }
