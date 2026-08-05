@@ -201,6 +201,21 @@ describe("core-record derivation from the profile", () => {
     expect(core).toEqual({ v: 1, respond_to: "owner-only", inactivity_exit_sec: 0 });
   });
 
+  it("falls back to the payload's system_prompt when the profile is silent", () => {
+    const core = buildCoreConfig(settings(), 0, [], "gui instructions");
+    expect(core.system_prompt).toBe("gui instructions");
+  });
+
+  it("lets a profile prompt win over the payload fallback, without concatenation", () => {
+    const core = buildCoreConfig(settings({ systemPrompt: "profile prompt" }), 0, [], "gui instructions");
+    expect(core.system_prompt).toBe("profile prompt");
+  });
+
+  it("emits no system_prompt when both profile and payload are silent", () => {
+    const core = buildCoreConfig(settings(), 0, [], null);
+    expect(core.system_prompt).toBeUndefined();
+  });
+
   it("takes extensions from the profile", () => {
     const fromProfile = buildCoreConfig(settings(), 0, ["npm:@wierdbytes/pi-anthropic"]);
     expect(fromProfile.extensions).toEqual(["npm:@wierdbytes/pi-anthropic"]);

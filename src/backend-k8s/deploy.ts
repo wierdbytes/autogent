@@ -87,8 +87,9 @@ export async function deployToK8s(input: K8sDeployInput): Promise<K8sDeployOutco
   }
 
   // 2. Records before substrate: the Pod reads them at first start. The
-  //    profile's agent settings are the record's sole source (payload env
-  //    and payload model/prompt fields are ignored by design).
+  //    profile's agent settings are the record's primary source (payload env
+  //    and the payload model field are ignored by design); the payload's
+  //    system_prompt is used only when the profile leaves it unset.
   await publishDeployRecords({
     payload,
     ...(input.profile ? { settings: input.profile } : {}),

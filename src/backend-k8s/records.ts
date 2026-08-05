@@ -46,21 +46,30 @@ function effectiveEnv(payload: DeployPayload): Record<string, string> {
 
 /**
  * Derives the core-record config from the deploy profile's agent settings.
- * The registry profile is the *sole source*: whatever the Desktop payload or
- * its launch env carries for these fields (model, system prompt, respond
- * gate, tools, scheduler, extensions) is deliberately ignored — the GUI's
- * remaining surface is picking the profile, and one source cannot drift.
+ * The registry profile is the *primary source*: whatever the Desktop payload
+ * or its launch env carries for model, respond gate, tools, scheduler and
+ * extensions is deliberately ignored — the GUI's remaining surface is picking
+ * the profile, and one source cannot drift.
+ *
+ * The one exception is the system prompt: when the profile is silent on it,
+ * the Desktop record's `system_prompt` (the GUI's "Agent instructions"
+ * field) is used instead of being dropped, so a GUI-authored prompt is not
+ * silently lost on a profile that never set one. A profile prompt still wins
+ * outright — no concatenation — so a profile that *does* speak stays the
+ * single source.
  */
 export function buildCoreConfig(
   settings: AgentSettings,
   inactivitySeconds: number,
   extensions: string[] = [],
+  fallbackSystemPrompt: string | null = null,
 ): CoreConfigV1 {
   const config: CoreConfigV1 = { v: 1 };
 
   if (settings.model !== null) config.model = settings.model;
   if (settings.thinking !== null) config.thinking = settings.thinking;
-  if (settings.systemPrompt !== null) config.system_prompt = settings.systemPrompt;
+  const systemPrompt = settings.systemPrompt ?? fallbackSystemPrompt;
+  if (systemPrompt !== null) config.system_prompt = systemPrompt;
 
   config.respond_to = settings.respondTo;
   if (settings.respondToAllowlist.length > 0) {
@@ -107,7 +116,7 @@ export function buildPodEnv(payload: DeployPayload): Record<string, string> {
 
 export interface PublishRecordsInput {
   payload: DeployPayload;
-  /** Agent settings from the deploy profile — the sole source for the record. */
+  /** Agent settings from the deploy profile — the record's primary source. */
   settings?: AgentSettings;
   inactivitySeconds: number;
   /** Pi extension sources from the deploy profile. */
@@ -143,6 +152,7 @@ export async function publishDeployRecords(input: PublishRecordsInput): Promise<
       input.settings ?? DEFAULT_AGENT_SETTINGS,
       input.inactivitySeconds,
       input.extensions ?? [],
+      payload.systemPrompt,
     );
     await records.publish(CONFIG_SLUG, { slug: CONFIG_SLUG, value: core });
     await records.publish(AUTH_SLUG, {
