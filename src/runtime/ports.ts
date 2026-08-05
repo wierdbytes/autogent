@@ -312,6 +312,13 @@ export interface AgentSessionHandle {
   readonly model: string | undefined;
   /** Context window of the active model, in tokens, when the SDK reports it. */
   readonly contextWindow: number | undefined;
+  /**
+   * True when the session already holds conversation memory: it was resumed
+   * from an on-disk transcript, or it has been prompted at least once in this
+   * process. Context fetching keys off this to avoid re-injecting messages the
+   * session already carries (its own replies, previously delivered triggers).
+   */
+  readonly hasHistory: boolean;
   prompt(text: string): Promise<void>;
   steer(text: string): Promise<void>;
   abort(): Promise<void>;

@@ -274,6 +274,8 @@ export class AppRuntime {
       relay: this.#relay,
       logger: this.#logger.child({ component: "context" }),
       limit: this.#config.scheduler.contextMessageLimit,
+      agentPubkey: this.#signer.publicKey,
+      deliveredDispositionOf: (eventId) => this.#state.inbox.get(eventId)?.disposition ?? null,
     });
 
     const output = new OutputRouter({
@@ -292,7 +294,7 @@ export class AppRuntime {
       sessions: this.#sessions,
       clock: this.#clock,
       logger: this.#logger.child({ component: "channel" }),
-      fetchContext: (event, threadRootId) => this.#context.fetch(event, threadRootId),
+      fetchContext: (event, threadRootId, opts) => this.#context.fetch(event, threadRootId, opts),
       observeUsage: (sessionId, turnId, usage) =>
         this.#usageTracker.observe(sessionId, turnId, usage),
       publishUsage: (turn, sessionId, stopReason) =>

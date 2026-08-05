@@ -66,6 +66,68 @@ function fakeSdk({ extensionTools, capture }: FakeSdkOptions) {
   };
 }
 
+describe("session history state", () => {
+  it("reports no history on a fresh session until the first prompt", async () => {
+    const registry = new SessionRegistry({
+      config: { cwd: "/tmp/workspace" },
+      channels: channelsStub(),
+      relayId: "relay",
+      logger: nullLogger,
+      loadSdk: async () =>
+        fakeSdk({ extensionTools: new Map(), capture: () => {} }) as never,
+    });
+
+    const session = await registry.acquire("channel-1");
+    expect(session.hasHistory).toBe(false);
+
+    await session.prompt("hello");
+    expect(session.hasHistory).toBe(true);
+  });
+
+  it("reports history immediately when reopened from a prior transcript", async () => {
+    const channels = channelsStub();
+    channels.get = () => ({
+      relayId: "relay",
+      channelId: "channel-1",
+      status: "active",
+      name: null,
+      channelType: "stream",
+      piSessionId: "session-0",
+      piSessionPath: "/tmp/session.jsonl",
+      lastSeenCreatedAt: null,
+    });
+    const registry = new SessionRegistry({
+      config: { cwd: "/tmp/workspace" },
+      channels,
+      relayId: "relay",
+      logger: nullLogger,
+      loadSdk: async () =>
+        fakeSdk({ extensionTools: new Map(), capture: () => {} }) as never,
+    });
+
+    const session = await registry.acquire("channel-1");
+    expect(session.hasHistory).toBe(true);
+  });
+
+  it("loses history again after a rotation", async () => {
+    const registry = new SessionRegistry({
+      config: { cwd: "/tmp/workspace" },
+      channels: channelsStub(),
+      relayId: "relay",
+      logger: nullLogger,
+      loadSdk: async () =>
+        fakeSdk({ extensionTools: new Map(), capture: () => {} }) as never,
+    });
+
+    const session = await registry.acquire("channel-1");
+    await session.prompt("hello");
+    expect(session.hasHistory).toBe(true);
+
+    const rotated = await registry.rotate("channel-1");
+    expect(rotated.hasHistory).toBe(false);
+  });
+});
+
 describe("SessionRegistry tool allowlist", () => {
   it("widens the sandbox allowlist with extension and relay tool names", async () => {
     let captured: Record<string, unknown> = {};
