@@ -51,6 +51,8 @@ import {
 /* Small helpers                                                              */
 /* -------------------------------------------------------------------------- */
 
+const LOG_TAIL_LINES = 200;
+
 function cancelled(value: unknown): value is symbol {
   return p.isCancel(value);
 }
@@ -560,7 +562,10 @@ async function profileMenu(name: string): Promise<void> {
       message: "Action",
       options: [
         ...(profile.agentPubkey !== null
-          ? [{ value: "status", label: "Check live status in the cluster (kubectl)" }]
+          ? [
+              { value: "status", label: "Check live status in the cluster (kubectl)" },
+              { value: "logs", label: "Show pod logs" },
+            ]
           : []),
         { value: "edit", label: "Edit substrate parameters (cluster, image, storage)" },
         { value: "agent", label: "Edit agent settings (model, effort, prompt, …)" },
@@ -576,6 +581,27 @@ async function profileMenu(name: string): Promise<void> {
       spinner.start("Probing the cluster");
       const status = await probeProfile(profile);
       spinner.stop(status);
+      continue;
+    }
+
+    if (action === "logs") {
+      const spinner = p.spinner();
+      spinner.start("Fetching pod logs");
+      try {
+        const result = await kubectl(
+          ["logs", podName(profile.agentPubkey!), `--tail=${LOG_TAIL_LINES}`],
+          { context: profile.kubeContext, namespace: profile.namespace, timeoutMs: 30_000 },
+        );
+        if (result.code !== 0) {
+          spinner.stop(`kubectl logs failed: ${result.stderr.split("\n", 1)[0]?.trim() ?? "unknown error"}`);
+          continue;
+        }
+        spinner.stop(`Pod logs (last ${LOG_TAIL_LINES} lines)`);
+        const text = result.stdout.trimEnd();
+        p.note(text.length > 0 ? text : "(no log output)", `kubectl logs ${podName(profile.agentPubkey!)}`);
+      } catch (error) {
+        spinner.stop(`log fetch failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
       continue;
     }
 
