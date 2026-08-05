@@ -97,8 +97,9 @@ export interface LifecycleConfig {
 
 export interface RemoteConfig {
   /**
-   * When true the agent is record-configured (remote plan §3.3): the `core`
-   * config-record head (kind 30078) overrides env, `mem/provider-auth` is
+   * When true the agent is record-configured (remote plan §3.3): the
+   * `autogent/config` config-record head (kind 30078) overrides env,
+   * `autogent/auth` is
    * materialised into a pi `auth.json`, and a missing head is fail-closed
    * degraded rather than "start empty". Set by the k8s provider; off for
    * local development.

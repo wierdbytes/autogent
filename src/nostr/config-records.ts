@@ -10,15 +10,17 @@
  *
  * Two records are stored this way:
  *
- * - slug `core` — the agent's effective configuration (a versioned JSON
- *   document in the core body's `profile` field);
- * - slug `mem/provider-auth` — a pi-compatible `auth.json` payload in a
- *   memory body's `value` field.
+ * - slug `autogent/config` — the agent's effective configuration: a versioned
+ *   JSON document stored as-is in the body's `value` field;
+ * - slug `autogent/auth` — a pi-compatible `auth.json` document stored as-is
+ *   in the body's `value` field; `value: null` is a tombstone (read as
+ *   absent).
  *
  * Unlike the earlier NIP-AE engram channel (kind 30174), records carry no
  * `p` tag and no NIP-OA auth tag: nothing on the wire links the record — or
- * the channel — to the owner pubkey. The body grammar is kept identical to
- * NIP-AE's so the payload shapes (and their tests) carry over unchanged.
+ * the channel — to the owner pubkey. Every body is `{ slug, value }` with
+ * `value` carrying the JSON document exactly as it appears in its final
+ * form — the config document itself, the `auth.json` document itself.
  */
 
 import { verifyNostrEvent, type Signer } from "./signer.js";
@@ -31,20 +33,17 @@ import { KIND, tagsNamed, type NostrEvent } from "./types.js";
  */
 const D_TAG_DOMAIN = "agent-config/v1/d-tag";
 
-/** `core` or `mem/<seg>(/<seg>)*`, ≤255 bytes (NIP-AE slug grammar, reused). */
+/** `autogent/<seg>(/<seg>)*`, ≤255 bytes. */
 const SLUG_SEGMENT = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const SLUG_NAMESPACE = "autogent/";
 
-export const CORE_SLUG = "core";
-export const PROVIDER_AUTH_SLUG = "mem/provider-auth";
-
-/** NIP-31 alt tag value on every record; a non-leaking hint for unknown-kind viewers. */
-export const RECORD_ALT = "encrypted agent config record";
+export const CONFIG_SLUG = "autogent/config";
+export const AUTH_SLUG = "autogent/auth";
 
 export function isValidSlug(slug: string): boolean {
-  if (slug === CORE_SLUG) return true;
   if (Buffer.byteLength(slug, "utf8") > 255) return false;
-  if (!slug.startsWith("mem/")) return false;
-  const segments = slug.slice("mem/".length).split("/");
+  if (!slug.startsWith(SLUG_NAMESPACE)) return false;
+  const segments = slug.slice(SLUG_NAMESPACE.length).split("/");
   return segments.length > 0 && segments.every((segment) => SLUG_SEGMENT.test(segment));
 }
 
@@ -72,24 +71,15 @@ export function deriveRecordDTag(signer: Signer, slug: string): string {
 /* Bodies                                                                     */
 /* -------------------------------------------------------------------------- */
 
-/** The core record: exactly one per agent. */
-export interface CoreBody {
-  slug: typeof CORE_SLUG;
-  /** Free-form UTF-8. The config JSON document lives here. */
-  profile: string;
-}
-
-/** A memory-shaped record. `value: null` is a tombstone (read as absent). */
-export interface MemoryBody {
+/**
+ * Every record body is `{ slug, value }`, with `value` carrying the JSON
+ * document exactly as it appears in its final form: the config document for
+ * `autogent/config`, the `auth.json` document for `autogent/auth`. A
+ * `value: null` is a tombstone (read as absent).
+ */
+export interface RecordBody {
   slug: string;
-  value: string | null;
-}
-
-export type RecordBody = CoreBody | MemoryBody;
-
-/** Narrowing guard: `MemoryBody["slug"]` is `string`, so `slug` alone cannot. */
-export function isCoreBody(body: RecordBody): body is CoreBody {
-  return body.slug === CORE_SLUG && "profile" in body;
+  value: unknown;
 }
 
 function asObject(value: unknown): Record<string, unknown> | null {
@@ -113,14 +103,13 @@ export function parseRecordBody(plaintext: string, expectedSlug: string): Record
   const object = asObject(value);
   if (!object) return null;
   if (object["slug"] !== expectedSlug) return null;
-
-  if (expectedSlug === CORE_SLUG) {
-    if (typeof object["profile"] !== "string") return null;
-    return { slug: CORE_SLUG, profile: object["profile"] };
-  }
   if (!isValidSlug(expectedSlug)) return null;
+
   const bodyValue = object["value"];
-  if (bodyValue !== null && typeof bodyValue !== "string") return null;
+  if (bodyValue !== null && (typeof bodyValue !== "object" || Array.isArray(bodyValue))) return null;
+  // The config document cannot be tombstoned: an agent without a config record
+  // is degraded, never revoked.
+  if (expectedSlug === CONFIG_SLUG && bodyValue === null) return null;
   return { slug: expectedSlug, value: bodyValue };
 }
 
@@ -190,5 +179,5 @@ export function selectRecordHead(events: readonly NostrEvent[], context: HeadCon
 
 /** True when a head is a tombstoned memory record (`value: null`). */
 export function isTombstone(head: RecordHead): boolean {
-  return head.body.slug !== CORE_SLUG && (head.body as MemoryBody).value === null;
+  return head.body.slug !== CONFIG_SLUG && head.body.value === null;
 }

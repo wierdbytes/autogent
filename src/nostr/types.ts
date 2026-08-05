@@ -93,8 +93,8 @@ export const KIND = {
   /**
    * NIP-78 application-specific data (parameterised replaceable).
    *
-   * Carries the agent's own config records: the `core` config record and the
-   * `mem/provider-auth` credentials record, self-signed and NIP-44
+   * Carries the agent's own config records: the `autogent/config` record and
+   * the `autogent/auth` credentials record, self-signed and NIP-44
    * self-encrypted (d-tags are HMAC-derived, see nostr/config-records.ts).
    * The Buzz relay accepts this kind with the same `UsersWrite` scope as
    * profiles; NIP-RS read-state shares the kind but is keyed by

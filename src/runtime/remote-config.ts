@@ -1,9 +1,9 @@
 /**
  * Core-record configuration (remote plan §3.3).
  *
- * The `core` record carries the owner-side effective config as a versioned
- * JSON document, embedded in the NIP-AE core body's `profile` field. It is a
- * derived artifact: Desktop/CLI recompute and republish it on every deploy and
+ * The `autogent/config` record carries the owner-side effective config as a
+ * versioned JSON document, stored as-is in the record body's `value` field.
+ * It is a derived artifact: Desktop/CLI recompute and republish it on every and
  * agent-record change, so the runtime treats the head as authoritative and the
  * env-derived config as a base layer for local development only.
  */
@@ -79,21 +79,15 @@ export interface ParsedCoreConfig {
 }
 
 /**
- * Parses the config JSON found in the core record's `profile` field.
+ * Parses the config document found in the config record's `value` field.
  *
  * Strict on the envelope (`v: 1` or reject — an unknown version may carry
  * semantics we would silently misapply), tolerant on unknown extra keys so a
  * newer owner-side writer does not brick an older agent.
  */
-export function parseCoreConfig(profile: string): ParsedCoreConfig {
+export function parseCoreConfig(document: unknown): ParsedCoreConfig {
   const problems: string[] = [];
-  let raw: unknown;
-  try {
-    raw = JSON.parse(profile);
-  } catch {
-    return { config: null, problems: ["core config is not valid JSON"] };
-  }
-  const object = asObject(raw);
+  const object = asObject(document);
   if (!object) return { config: null, problems: ["core config must be a JSON object"] };
   if (object["v"] !== 1) {
     return { config: null, problems: [`unsupported core config version ${JSON.stringify(object["v"])}`] };
@@ -188,9 +182,4 @@ export function applyCoreConfig(base: AgentConfig, core: CoreConfigV1): AgentCon
   }
   if (core.inactivity_exit_sec !== undefined) next.lifecycle.inactivityExitSec = core.inactivity_exit_sec;
   return next;
-}
-
-/** Serialises an effective config into the core-record `profile` payload. */
-export function serializeCoreConfig(config: CoreConfigV1): string {
-  return JSON.stringify(config);
 }

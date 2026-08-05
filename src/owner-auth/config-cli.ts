@@ -1,8 +1,8 @@
 /**
  * `autogent-nostr config show|publish` — owner-side config record management.
  *
- *   config show    --agent <pubkey>                 print the current core head
- *   config publish --agent <pubkey> --file <path>   publish a new core head
+ *   config show    --agent <pubkey>                 print the current config head
+ *   config publish --agent <pubkey> --file <path>   publish a new config head
  *
  * Both sign with the agent key from Buzz Desktop's OS keyring (or
  * `--nsec-file`), exactly like `auth login/revoke`: the deploy tooling holds
@@ -18,7 +18,7 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { CORE_SLUG, isCoreBody, PROVIDER_AUTH_SLUG, isTombstone } from "../nostr/config-records.js";
+import { CONFIG_SLUG, AUTH_SLUG, isTombstone } from "../nostr/config-records.js";
 import { RecordClient } from "../nostr/record-client.js";
 import { isPubkey } from "../nostr/signer.js";
 import { systemClock } from "../runtime/clock.js";
@@ -48,24 +48,25 @@ export async function commandConfigShow(flags: ConfigFlags): Promise<number> {
   try {
     const records = new RecordClient({ relay, signer, clock: systemClock });
 
-    const core = await records.fetchHead(CORE_SLUG);
-    if (core && isCoreBody(core.body)) {
+    const core = await records.fetchHead(CONFIG_SLUG);
+    if (core && core.body.slug === CONFIG_SLUG) {
       process.stdout.write(
-        `core head: created_at=${core.createdAt} event=${core.event.id}\n${core.body.profile}\n`,
+        `config head: created_at=${core.createdAt} event=${core.event.id}\n` +
+          `${JSON.stringify(core.body.value, null, 2)}\n`,
       );
     } else {
-      process.stdout.write("core head: (none) — the agent runs degraded until one is published\n");
+      process.stdout.write("config head: (none) — the agent runs degraded until one is published\n");
     }
 
     // Presence only, never the credential bytes: this command may run in a
     // shell whose scrollback outlives the operator's intentions.
-    const auth = await records.fetchHead(PROVIDER_AUTH_SLUG);
+    const auth = await records.fetchHead(AUTH_SLUG);
     if (auth === null) {
-      process.stdout.write("provider-auth head: (none)\n");
+      process.stdout.write("auth head: (none)\n");
     } else if (isTombstone(auth)) {
-      process.stdout.write(`provider-auth head: tombstoned (created_at=${auth.createdAt})\n`);
+      process.stdout.write(`auth head: tombstoned (created_at=${auth.createdAt})\n`);
     } else {
-      process.stdout.write(`provider-auth head: present (created_at=${auth.createdAt})\n`);
+      process.stdout.write(`auth head: present (created_at=${auth.createdAt})\n`);
     }
     return core ? 0 : 1;
   } finally {
@@ -77,13 +78,13 @@ export async function commandConfigPublish(flags: ConfigFlags): Promise<number> 
   const agent = requireAgent(flags, "publish");
   if (agent === null) return 2;
   if (!flags.file) {
-    process.stderr.write("config publish requires --file <core-config.json>\n");
+    process.stderr.write("config publish requires --file <config.json>\n");
     return 2;
   }
 
-  let profile: string;
+  let raw: string;
   try {
-    profile = await readFile(flags.file, "utf8");
+    raw = await readFile(flags.file, "utf8");
   } catch (error) {
     process.stderr.write(
       `cannot read ${flags.file}: ${error instanceof Error ? error.message : String(error)}\n`,
@@ -91,9 +92,19 @@ export async function commandConfigPublish(flags: ConfigFlags): Promise<number> 
     return 2;
   }
 
+  let document: unknown;
+  try {
+    document = JSON.parse(raw);
+  } catch (error) {
+    process.stderr.write(
+      `${flags.file} is not valid JSON: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return 2;
+  }
+
   // Validate before touching the network: publishing a document the agent
   // will reject only converts a local typo into a remote no-op.
-  const parsed = parseCoreConfig(profile);
+  const parsed = parseCoreConfig(document);
   if (!parsed.config) {
     for (const problem of parsed.problems) process.stderr.write(`invalid config: ${problem}\n`);
     return 2;
@@ -105,10 +116,12 @@ export async function commandConfigPublish(flags: ConfigFlags): Promise<number> 
   const relay = await connectAsAgent(signer, relayUrl);
   try {
     const records = new RecordClient({ relay, signer, clock: systemClock });
-    const head = await records.publish(CORE_SLUG, { slug: CORE_SLUG, profile });
+    // Publish the parsed document, not the normalised `parsed.config`: unknown
+    // keys survive so a newer CLI does not strip fields an older agent ignores.
+    const head = await records.publish(CONFIG_SLUG, { slug: CONFIG_SLUG, value: document });
 
     // Verify-after-write: the head we read back must be the event we wrote.
-    const verified = await records.fetchHead(CORE_SLUG);
+    const verified = await records.fetchHead(CONFIG_SLUG);
     if (verified === null || verified.event.id !== head.event.id) {
       process.stderr.write(
         `conflict: the relay's core head is ${verified ? verified.event.id : "absent"}, ` +

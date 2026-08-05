@@ -13,7 +13,6 @@ import type { Clock, Logger, RelayPort, Subscription } from "../runtime/ports.js
 import { nullLogger } from "../runtime/logger.js";
 import {
   deriveRecordDTag,
-  RECORD_ALT,
   selectRecordHead,
   serializeRecordBody,
   type RecordBody,
@@ -97,10 +96,7 @@ export class RecordClient {
       pubkey: this.agentPubkey,
       kind: KIND.APP_DATA,
       created_at: createdAt,
-      tags: [
-        ["d", this.dTag(slug)],
-        ["alt", RECORD_ALT],
-      ],
+      tags: [["d", this.dTag(slug)]],
       content: this.#signer.encrypt(this.agentPubkey, serializeRecordBody(body)),
     });
 

@@ -10,8 +10,8 @@ import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools/pure
 import { defaultConfig, type AgentConfig } from "../src/config.js";
 import { RecordClient } from "../src/nostr/record-client.js";
 import {
-  CORE_SLUG,
-  PROVIDER_AUTH_SLUG,
+  CONFIG_SLUG,
+  AUTH_SLUG,
   deriveRecordDTag,
 } from "../src/nostr/config-records.js";
 import { signAttestation } from "../src/nostr/nip-oa.js";
@@ -209,15 +209,15 @@ describe("degraded mode", () => {
     harness = await bootRemote({ missing: { core: true, providerAuth: true } });
 
     harness.relay.deliver(
-      harness.recordEvent(CORE_SLUG, { slug: "core", profile: JSON.stringify({ v: 1 }) }, 1_800_000_000),
+      harness.recordEvent(CONFIG_SLUG, { slug: CONFIG_SLUG, value: { v: 1 } }, 1_800_000_000),
     );
     await settle();
     expect(harness.runtime.degraded).toBe(true); // auth still missing
 
     harness.relay.deliver(
       harness.recordEvent(
-        PROVIDER_AUTH_SLUG,
-        { slug: PROVIDER_AUTH_SLUG, value: '{"anthropic":{"type":"oauth"}}' },
+        AUTH_SLUG,
+        { slug: AUTH_SLUG, value: { anthropic: { type: "oauth" } } },
         1_800_000_001,
       ),
     );
@@ -237,7 +237,7 @@ describe("degraded mode", () => {
     expect(harness.runtime.degraded).toBe(false);
 
     harness.relay.deliver(
-      harness.recordEvent(PROVIDER_AUTH_SLUG, { slug: PROVIDER_AUTH_SLUG, value: null }, 1_800_000_000),
+      harness.recordEvent(AUTH_SLUG, { slug: AUTH_SLUG, value: null }, 1_800_000_000),
     );
     await waitFor(() => harness.runtime.degraded);
     expect(harness.runtime.degraded).toBe(true);
@@ -259,8 +259,8 @@ describe("hot core-config application", () => {
     // Base config answers anyone; the record tightens to owner-only.
     harness.relay.deliver(
       harness.recordEvent(
-        CORE_SLUG,
-        { slug: "core", profile: JSON.stringify({ v: 1, respond_to: "owner-only" }) },
+        CONFIG_SLUG,
+        { slug: CONFIG_SLUG, value: { v: 1, respond_to: "owner-only" } },
         1_800_000_000,
       ),
     );
@@ -278,8 +278,8 @@ describe("hot core-config application", () => {
     // Malformed config: rejected, gate unchanged (still anyone).
     harness.relay.deliver(
       harness.recordEvent(
-        CORE_SLUG,
-        { slug: "core", profile: JSON.stringify({ v: 1, respond_to: "everyone" }) },
+        CONFIG_SLUG,
+        { slug: CONFIG_SLUG, value: { v: 1, respond_to: "everyone" } },
         1_800_000_000,
       ),
     );

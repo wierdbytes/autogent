@@ -1,9 +1,9 @@
 /**
  * Provider-credential materialisation and write-back (remote plan §3.2).
  *
- * The `mem/provider-auth` config record carries the byte content of a pi-compatible
- * `auth.json` (a `Record<providerId, Credential>`; multi-provider by
- * construction, resolving open question О-4). At boot the head is materialised
+ * The `autogent/auth` config record carries a pi-compatible `auth.json`
+ * document in its `value` field (a `Record<providerId, Credential>`;
+ * multi-provider by construction, resolving open question О-4). At boot the head is materialised
  * into `<stateDir>/pi-agent/auth.json` and the agent's Pi sessions are pointed
  * at that directory. When the pi SDK refreshes an OAuth token it rewrites the
  * file; a watcher picks the change up and republishes the record so a Pod
@@ -55,6 +55,19 @@ export function isPlausibleAuthJson(content: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Serialises an auth record's `value` into `auth.json` file content. */
+export function authContentFromValue(value: unknown): string | null {
+  if (value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) return null;
+  return JSON.stringify(value);
+}
+
+/** Parses `auth.json` file content into an auth record's `value`. */
+export function authValueFromContent(content: string): Record<string, unknown> | null {
+  if (!isPlausibleAuthJson(content)) return null;
+  return JSON.parse(content) as Record<string, unknown>;
 }
 
 export function digestOf(content: string): string {

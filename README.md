@@ -161,7 +161,7 @@ resolved configuration.
 | `AUTOGENT_MODEL` | pi's default | e.g. `anthropic/claude-sonnet-4-5` |
 | `AUTOGENT_THINKING` | pi's default | Thinking level |
 | `AUTOGENT_TOOLS` / `AUTOGENT_EXCLUDE_TOOLS` | — | Tool allow/deny lists |
-| `AUTOGENT_EXTENSIONS` | — | Comma-separated pi extension sources (paths or `npm:`/`git:`). On k8s deploys the list comes from the deploy profile (interactive `autogent` CLI) via the core config record; this env var overrides it |
+| `AUTOGENT_EXTENSIONS` | — | Comma-separated pi extension sources (paths or `npm:`/`git:`). On k8s deploys the list comes from the deploy profile (interactive `autogent` CLI) via the config record (`autogent/config`); this env var overrides it |
 | `AUTOGENT_READ_ROOTS` / `AUTOGENT_WRITE_ROOTS` | cwd | Filesystem sandbox roots |
 | `AUTOGENT_COMMAND_DENYLIST` | — | Refused bash substrings |
 | `AUTOGENT_MAX_CONCURRENT_TURNS` | `4` | Channels running a turn at once |
@@ -317,7 +317,7 @@ The shape of it:
   bootstrap triple (`AUTOGENT_NSEC`, `AUTOGENT_RELAY_URL`, `AUTOGENT_AUTH_TAG`).
   Everything else — model, prompt, respond-to policy, the Anthropic OAuth
   credential — lives on the relay as NIP-78 config records (kind `30078`,
-  slugs `core` and `mem/provider-auth`): addressable events signed by the
+  slugs `autogent/config` and `autogent/auth`): addressable events signed by the
   agent key, NIP-44-encrypted to *itself*, with HMAC-derived `d` tags. Only
   holders of the agent nsec (the agent and the owner-side deploy tooling) can
   read, address or write them, and nothing on the wire links them to the

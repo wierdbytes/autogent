@@ -51,7 +51,7 @@ Usage:
   autogent-nostr auth status [--agent <pubkey>]
   autogent-nostr auth revoke --agent <pubkey> [--relay <url>] [--nsec-file <path>]
   autogent-nostr config show    --agent <pubkey> [--relay <url>] [--nsec-file <path>]
-  autogent-nostr config publish --agent <pubkey> --file <core-config.json>
+  autogent-nostr config publish --agent <pubkey> --file <config.json>
                                 [--relay <url>] [--nsec-file <path>]
   autogent-nostr profile sync
   autogent-nostr doctor
@@ -70,10 +70,11 @@ Commands:
   channel remove    Remove a member from a channel (OWNER host).
   auth              Bind an Anthropic OAuth account to a remote agent (OWNER host):
                     the credential is stored per agent and published as the
-                    mem/provider-auth config record (kind 30078), which the
+                    autogent/auth config record (kind 30078), which the
                     remote Pod reads at boot.
   config show/publish
-                    Inspect or update a remote agent's core config record
+                    Inspect or update a remote agent's config record
+                    (autogent/config)
                     (OWNER host — signs with the agent key, no redeploy needed;
                     the running agent reconfigures live). Plain 'config' prints
                     this host's env-derived local config.

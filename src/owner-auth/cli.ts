@@ -14,9 +14,10 @@
  */
 
 import { RecordClient } from "../nostr/record-client.js";
-import { PROVIDER_AUTH_SLUG } from "../nostr/config-records.js";
+import { AUTH_SLUG } from "../nostr/config-records.js";
 import { isPubkey, type Signer } from "../nostr/signer.js";
 import { systemClock } from "../runtime/clock.js";
+import { authValueFromContent } from "../runtime/provider-auth.js";
 import { connectAsAgent, resolveAgentSigner, resolveRelayUrl } from "./agent-relay.js";
 import { runOAuthLogin } from "./oauth.js";
 import {
@@ -44,12 +45,12 @@ interface AuthFlags {
 async function publishAuthRecord(
   signer: Signer,
   relayUrl: string,
-  value: string | null,
+  value: Record<string, unknown> | null,
 ): Promise<void> {
   const relay = await connectAsAgent(signer, relayUrl);
   try {
     const records = new RecordClient({ relay, signer, clock: systemClock });
-    await records.publish(PROVIDER_AUTH_SLUG, { slug: PROVIDER_AUTH_SLUG, value });
+    await records.publish(AUTH_SLUG, { slug: AUTH_SLUG, value });
   } finally {
     await relay.close();
   }
@@ -90,8 +91,13 @@ export async function commandAuthLogin(flags: AuthFlags): Promise<number> {
   }
 
   try {
-    await publishAuthRecord(signer, relayUrl, authJson);
-    process.stdout.write(`Published mem/provider-auth for agent ${agent}\n`);
+    const value = authValueFromContent(authJson);
+    if (value === null) {
+      process.stderr.write("the stored credential is not a JSON object — aborting\n");
+      return 1;
+    }
+    await publishAuthRecord(signer, relayUrl, value);
+    process.stdout.write(`Published autogent/auth for agent ${agent}\n`);
   } catch (error) {
     process.stderr.write(
       `credential stored locally, but the record publish failed: ` +
@@ -146,7 +152,7 @@ export async function commandAuthRevoke(flags: AuthFlags): Promise<number> {
   await publishAuthRecord(signer, relayUrl, null);
   const removed = await removeBinding(agent);
   process.stdout.write(
-    `Tombstoned mem/provider-auth for ${agent}` +
+    `Tombstoned autogent/auth for ${agent}` +
       (removed ? " and removed the local binding\n" : " (no local binding was recorded)\n"),
   );
   return 0;

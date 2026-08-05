@@ -6,7 +6,8 @@
  *
  * In record-configured (remote) mode the boot order is relay-first (remote
  * plan §3): the sealed identity may be materialised from the deploy Secret's
- * env triple, then the `core` and `mem/provider-auth` config-record heads are
+ * env triple, then the `autogent/config` and `autogent/auth` config-record
+ * heads are
  * fetched over the same authenticated relay connection the runtime will keep,
  * and only then is the runtime constructed — with the record-derived effective
  * config, or degraded (prompts refused, presence "degraded") when a head is
@@ -17,7 +18,7 @@ import { mkdirSync } from "node:fs";
 import { applyEnv, defaultConfig, validateConfig, type AgentConfig } from "./config.js";
 import { RecordClient } from "./nostr/record-client.js";
 import { createEventBuilder } from "./nostr/event-builder.js";
-import { CORE_SLUG, isCoreBody, PROVIDER_AUTH_SLUG, type MemoryBody } from "./nostr/config-records.js";
+import { CONFIG_SLUG, AUTH_SLUG } from "./nostr/config-records.js";
 import { RelaySupervisor } from "./nostr/relay-supervisor.js";
 import { bootstrapIdentityFromEnv } from "./provisioning/bootstrap.js";
 import { createIdentityStore } from "./provisioning/identity-store.js";
@@ -26,7 +27,7 @@ import { AppRuntime, type RemoteRuntimeOptions } from "./runtime/app-runtime.js"
 import { systemClock } from "./runtime/clock.js";
 import { createLogger } from "./runtime/logger.js";
 import type { Logger, RelayPort } from "./runtime/ports.js";
-import { piAgentDir, reconcileProviderAuth, recordAuthSynced } from "./runtime/provider-auth.js";
+import { authContentFromValue, authValueFromContent, piAgentDir, reconcileProviderAuth, recordAuthSynced } from "./runtime/provider-auth.js";
 import { applyCoreConfig, parseCoreConfig } from "./runtime/remote-config.js";
 import type { Signer } from "./nostr/signer.js";
 import type { AuthTag } from "./nostr/nip-oa.js";
@@ -80,9 +81,9 @@ async function bootstrapRemote(
   let effective = baseConfig;
   let missingCore = true;
   let coreHeadCreatedAt = 0;
-  const coreHead = await records.fetchHead(CORE_SLUG);
-  if (coreHead && isCoreBody(coreHead.body)) {
-    const parsed = parseCoreConfig(coreHead.body.profile);
+  const coreHead = await records.fetchHead(CONFIG_SLUG);
+  if (coreHead && coreHead.body.slug === CONFIG_SLUG) {
+    const parsed = parseCoreConfig(coreHead.body.value);
     if (parsed.config) {
       const candidate = applyCoreConfig(baseConfig, parsed.config);
       const problems = validateConfig(candidate);
@@ -104,10 +105,10 @@ async function bootstrapRemote(
   }
 
   // --- provider-auth head -------------------------------------------------
-  const authHead = await records.fetchHead(PROVIDER_AUTH_SLUG);
+  const authHead = await records.fetchHead(AUTH_SLUG);
   const headView =
-    authHead && authHead.body.slug === PROVIDER_AUTH_SLUG
-      ? { content: (authHead.body as MemoryBody).value, createdAt: authHead.createdAt }
+    authHead && authHead.body.slug === AUTH_SLUG
+      ? { content: authContentFromValue(authHead.body.value), createdAt: authHead.createdAt }
       : null;
   const reconciled = await reconcileProviderAuth(base.stateDir, headView, logger);
 
@@ -122,11 +123,16 @@ async function bootstrapRemote(
       logger.warn("provider-auth record is tombstoned; starting degraded");
       missingAuth = true;
       break;
-    case "publish-local":
+    case "publish-local": {
+      const value = authValueFromContent(reconciled.content);
+      if (value === null) {
+        logger.warn("local auth.json is not a JSON object; not publishing it");
+        break;
+      }
       try {
         const head = await records.publish(
-          PROVIDER_AUTH_SLUG,
-          { slug: PROVIDER_AUTH_SLUG, value: reconciled.content },
+          AUTH_SLUG,
+          { slug: AUTH_SLUG, value },
           { createdAt: authHeadCreatedAt },
         );
         await recordAuthSynced(base.stateDir, reconciled.content, head.createdAt);
@@ -139,6 +145,7 @@ async function bootstrapRemote(
         });
       }
       break;
+    }
     case "materialized":
       logger.info("provider-auth record materialised into auth.json");
       break;

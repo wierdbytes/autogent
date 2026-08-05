@@ -2,9 +2,10 @@
  * Config-record publication during `deploy` (remote plan §4.3 step 3).
  *
  * The provider holds the nsec by design (that is its job in the provider
- * protocol), so it can sign as the agent: the `core` record is derived from
- * the deploy payload's effective config, and `mem/provider-auth` ships the
- * credential file that `autogent auth login` produced. Both are on the relay
+ * protocol), so it can sign as the agent: the `autogent/config` record is
+ * derived from the deploy payload's effective config, and `autogent/auth`
+ * ships the credential file that `autogent auth login` produced. Both are on
+ * the relay
  * *before* any k8s object exists, so a Pod never starts into a world where
  * its config could not have arrived yet.
  *
@@ -16,10 +17,11 @@
 import type { DeployPayload } from "../backend/payload.js";
 import { RecordClient } from "../nostr/record-client.js";
 import { createEventBuilder } from "../nostr/event-builder.js";
-import { CORE_SLUG, PROVIDER_AUTH_SLUG } from "../nostr/config-records.js";
+import { CONFIG_SLUG, AUTH_SLUG } from "../nostr/config-records.js";
 import { RelaySupervisor } from "../nostr/relay-supervisor.js";
 import { createSigner } from "../nostr/signer.js";
 import { fail } from "../backend/wire.js";
+import { authValueFromContent } from "../runtime/provider-auth.js";
 import { systemClock } from "../runtime/clock.js";
 import { nullLogger } from "../runtime/logger.js";
 import type { CoreConfigV1 } from "../runtime/remote-config.js";
@@ -147,15 +149,18 @@ export async function publishDeployRecords(input: PublishRecordsInput): Promise<
     logger: nullLogger,
   });
 
+  const authValue = authValueFromContent(input.providerAuthJson);
+  if (authValue === null) fail("providerAuthJson is not a JSON object");
+
   try {
     await relay.connect();
     const records = new RecordClient({ relay, signer, clock: systemClock });
 
     const core = buildCoreConfig(payload, input.inactivitySeconds, input.extensions ?? []);
-    await records.publish(CORE_SLUG, { slug: CORE_SLUG, profile: JSON.stringify(core) });
-    await records.publish(PROVIDER_AUTH_SLUG, {
-      slug: PROVIDER_AUTH_SLUG,
-      value: input.providerAuthJson,
+    await records.publish(CONFIG_SLUG, { slug: CONFIG_SLUG, value: core });
+    await records.publish(AUTH_SLUG, {
+      slug: AUTH_SLUG,
+      value: authValue,
     });
   } catch (error) {
     fail(

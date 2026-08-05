@@ -11,13 +11,13 @@ import { randomUUID } from "node:crypto";
 import type { AgentConfig } from "../config.js";
 import type { RecordClient } from "../nostr/record-client.js";
 import {
-  CORE_SLUG,
-  isCoreBody,
-  PROVIDER_AUTH_SLUG,
+  CONFIG_SLUG,
+  AUTH_SLUG,
   type RecordHead,
-  type MemoryBody,
 } from "../nostr/config-records.js";
 import {
+  authContentFromValue,
+  authValueFromContent,
   digestOf,
   materializeAuth,
   readLocalAuth,
@@ -662,8 +662,8 @@ export class AppRuntime {
     const remote = this.#remote;
     if (!remote) return;
 
-    remote.records.subscribe([CORE_SLUG, PROVIDER_AUTH_SLUG], (slug, head) => {
-      if (slug === CORE_SLUG) void this.#onCoreRecord(head);
+    remote.records.subscribe([CONFIG_SLUG, AUTH_SLUG], (slug, head) => {
+      if (slug === CONFIG_SLUG) void this.#onCoreRecord(head);
       else void this.#onAuthRecord(head);
     });
 
@@ -679,9 +679,9 @@ export class AppRuntime {
     const remote = this.#remote;
     if (!remote) return;
     if (head.createdAt <= this.#coreHeadCreatedAt) return;
-    if (!isCoreBody(head.body)) return;
+    if (head.body.slug !== CONFIG_SLUG) return;
 
-    const parsed = parseCoreConfig(head.body.profile);
+    const parsed = parseCoreConfig(head.body.value);
     if (!parsed.config) {
       // A malformed head keeps the previous config: stale beats broken.
       this.#logger.warn("rejected core record update", { problems: parsed.problems });
@@ -719,8 +719,8 @@ export class AppRuntime {
   /** Materialises a newer provider-auth head, or degrades on a tombstone. */
   async #onAuthRecord(head: RecordHead): Promise<void> {
     if (head.createdAt <= this.#authHeadCreatedAt) return;
-    const body = head.body as MemoryBody;
-    if (body.slug !== PROVIDER_AUTH_SLUG) return;
+    const body = head.body;
+    if (body.slug !== AUTH_SLUG) return;
     this.#authHeadCreatedAt = head.createdAt;
 
     if (body.value === null) {
@@ -732,13 +732,16 @@ export class AppRuntime {
       return;
     }
 
+    const content = authContentFromValue(body.value);
+    if (content === null) return;
+
     const local = await readLocalAuth(this.#config.stateDir);
-    if (local !== null && digestOf(local) === digestOf(body.value)) {
+    if (local !== null && digestOf(local) === digestOf(content)) {
       // Our own write-back echoing off the relay; just move the watermark.
-      await recordAuthSynced(this.#config.stateDir, body.value, head.createdAt);
+      await recordAuthSynced(this.#config.stateDir, content, head.createdAt);
       return;
     }
-    await materializeAuth(this.#config.stateDir, body.value, head.createdAt);
+    await materializeAuth(this.#config.stateDir, content, head.createdAt);
     this.#logger.info("provider-auth record materialised", { createdAt: head.createdAt });
     if (this.#missing.providerAuth) {
       this.#missing.providerAuth = false;
@@ -750,10 +753,15 @@ export class AppRuntime {
   async #writeBackAuth(content: string): Promise<void> {
     const remote = this.#remote;
     if (!remote) return;
+    const value = authValueFromContent(content);
+    if (value === null) {
+      this.#logger.warn("provider-auth write-back skipped: auth.json is not a JSON object");
+      return;
+    }
     try {
       const head = await remote.records.publish(
-        PROVIDER_AUTH_SLUG,
-        { slug: PROVIDER_AUTH_SLUG, value: content },
+        AUTH_SLUG,
+        { slug: AUTH_SLUG, value },
         { createdAt: this.#authHeadCreatedAt },
       );
       this.#authHeadCreatedAt = head.createdAt;
