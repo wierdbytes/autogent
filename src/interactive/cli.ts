@@ -31,6 +31,7 @@ import {
   providerConfigFromProfile,
 } from "../backend-k8s/config.js";
 import { podVerdict } from "../backend-k8s/deploy.js";
+import { redeployProfile } from "../backend-k8s/redeploy.js";
 import { getJson, kubectl } from "../backend-k8s/kubectl.js";
 import { podName } from "../backend-k8s/names.js";
 import { listAuthedCatalog, type AuthedProviderCatalog } from "../owner-auth/catalog.js";
@@ -565,6 +566,10 @@ async function profileMenu(name: string): Promise<void> {
           ? [
               { value: "status", label: "Check live status in the cluster (kubectl)" },
               { value: "logs", label: "Show pod logs" },
+              {
+                value: "redeploy",
+                label: "Redeploy (publish config to relay, roll out a new Pod)",
+              },
             ]
           : []),
         { value: "edit", label: "Edit substrate parameters (cluster, image, storage)" },
@@ -601,6 +606,30 @@ async function profileMenu(name: string): Promise<void> {
         p.note(text.length > 0 ? text : "(no log output)", `kubectl logs ${podName(profile.agentPubkey!)}`);
       } catch (error) {
         spinner.stop(`log fetch failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      continue;
+    }
+
+    if (action === "redeploy") {
+      const sure = await p.confirm({
+        message:
+          "Redeploy now? The config records are republished and the running Pod is " +
+          "replaced — a moved image tag is re-resolved to its current digest.",
+        initialValue: true,
+      });
+      if (cancelled(sure) || !sure) continue;
+      const spinner = p.spinner();
+      spinner.start("Redeploying");
+      try {
+        const outcome = await redeployProfile({
+          profile,
+          report: (message) => spinner.message(message),
+        });
+        spinner.stop(`Redeployed — Pod running (generation ${outcome.generation})`);
+      } catch (error) {
+        spinner.stop(
+          `redeploy failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
       continue;
     }
