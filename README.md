@@ -27,8 +27,8 @@ Install:
 
 ```bash
 npm install && npm run build
-npm link                  # → `autogent-nostr` on PATH
-npm run backend:install   # → `~/.local/bin/buzz-backend-autogent`, where Buzz looks
+npm link                  # → `autogent` + `autogent-nostr` on PATH (npm global bin)
+npm run backend:install   # → `buzz-backend-autogent*` in `~/.local/bin`, where Buzz looks
 ```
 
 Requires Node ≥ 22.19 and a working pi provider credential (`~/.pi/agent/auth.json`).
@@ -354,6 +354,7 @@ Setup, in order:
 # once, on the VM:                deploy/k3s-bootstrap.sh
 # once, on the owner machine:     merge kubeconfig, rename context (script prints how)
 npm run backend:install           # links both providers into ~/.local/bin
+npm link                          # puts `autogent` on PATH (npm global bin)
 autogent                          # interactive: create an agent profile
                                   # (kube context, namespace, image, storage,
                                   #  idle timeout + mandatory OAuth login)

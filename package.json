@@ -19,7 +19,7 @@
     "backend": "node scripts/backend-run.mjs",
     "agent:up": "node dist/cli.js up",
     "agent:status": "node dist/cli.js up --dry-run",
-    "backend:install": "mkdir -p \"$HOME/.local/bin\" && ln -sf \"$PWD/dist/backend/buzz-backend-autogent.cjs\" \"$HOME/.local/bin/buzz-backend-autogent\" && ln -sf \"$PWD/dist/backend/buzz-backend-autogent-k8s.cjs\" \"$HOME/.local/bin/buzz-backend-autogent-k8s\" && ln -sf \"$PWD/dist/interactive/cli.js\" \"$HOME/.local/bin/autogent\" && echo \"linked buzz-backend-autogent + buzz-backend-autogent-k8s + autogent into $HOME/.local/bin\"",
+    "backend:install": "mkdir -p \"$HOME/.local/bin\" && ln -sf \"$PWD/dist/backend/buzz-backend-autogent.cjs\" \"$HOME/.local/bin/buzz-backend-autogent\" && ln -sf \"$PWD/dist/backend/buzz-backend-autogent-k8s.cjs\" \"$HOME/.local/bin/buzz-backend-autogent-k8s\" && echo \"linked buzz-backend-autogent + buzz-backend-autogent-k8s into $HOME/.local/bin\"",
     "dev-relay": "node scripts/dev-relay.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
