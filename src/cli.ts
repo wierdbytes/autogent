@@ -47,7 +47,8 @@ Usage:
                                 [--owner-private-key <hex|nsec>]
   autogent-nostr channel remove --channel <uuid> [--pubkey <hex>]
                                 [--owner-private-key <hex|nsec>]
-  autogent-nostr auth login  --agent <pubkey> [--relay <url>] [--nsec-file <path>]
+  autogent-nostr auth login  --agent <pubkey> [--provider <id>] [--type oauth|api_key]
+                             [--relay <url>] [--nsec-file <path>]
   autogent-nostr auth status [--agent <pubkey>]
   autogent-nostr auth revoke --agent <pubkey> [--relay <url>] [--nsec-file <path>]
   autogent-nostr config show    --agent <pubkey> [--relay <url>] [--nsec-file <path>]
@@ -68,7 +69,8 @@ Commands:
   provision import  Verify and store an attestation (agent host).
   channel add       Add a member to a channel (OWNER host — signs with the owner key).
   channel remove    Remove a member from a channel (OWNER host).
-  auth              Bind an Anthropic OAuth account to a remote agent (OWNER host):
+  auth              Bind a model-provider account (OAuth or API key; any
+                    provider pi supports) to a remote agent (OWNER host):
                     the credential is stored per agent and published as the
                     autogent/auth config record (kind 30078), which the
                     remote Pod reads at boot.
@@ -393,6 +395,8 @@ export async function main(argv: string[]): Promise<number> {
         agent: flags.values.get("agent") ?? flags.positional[1],
         relay: flags.values.get("relay"),
         nsecFile: flags.values.get("nsec-file"),
+        provider: flags.values.get("provider"),
+        type: flags.values.get("type"),
       };
       if (sub === "login") return commandAuthLogin(authFlags);
       if (sub === "status") return commandAuthStatus(authFlags);

@@ -4,7 +4,7 @@
  *
  * The redesigned creation flow: agents are configured *here* first — a wizard
  * collects every substrate parameter (kube context, namespace, image, storage,
- * inactivity bound) and runs the mandatory pi/Anthropic OAuth login — and the
+ * inactivity bound) and runs the mandatory pi provider login (OAuth or API key) — and the
  * resulting deploy profile lands in the registry that Buzz Desktop's provider
  * form renders as a drop-down. The GUI keeps the minimal surface: it only
  * picks a profile; everything else is configured through this CLI.
@@ -31,7 +31,7 @@ import {
 import { podVerdict } from "../backend-k8s/deploy.js";
 import { getJson, kubectl } from "../backend-k8s/kubectl.js";
 import { podName } from "../backend-k8s/names.js";
-import { runOAuthLogin } from "../owner-auth/oauth.js";
+import { listLoginChoices, runProviderLogin } from "../owner-auth/oauth.js";
 import {
   PROFILE_NAME_RE,
   ensureProfileAuthDir,
@@ -264,12 +264,26 @@ async function promptParams(initial: ProfileParams): Promise<ProfileParams | nul
   };
 }
 
-/** Runs the mandatory OAuth login step. Returns false when it did not complete. */
+/**
+ * Runs the mandatory provider-login step: pick any provider pi supports
+ * (OAuth or API key), then run its interactive flow. Returns false when it
+ * did not complete.
+ */
 async function loginStep(name: string): Promise<boolean> {
-  p.log.step("Sign in to Anthropic (pi OAuth) — this credential powers the agent's model access");
+  p.log.step("Sign in to a model provider — this credential powers the agent's model access");
   const authPath = await ensureProfileAuthDir(name);
   try {
-    await runOAuthLogin(authPath);
+    const choices = await listLoginChoices(authPath);
+    const choice = await p.select({
+      message: "Model provider",
+      options: choices.map((item) => ({
+        value: item,
+        label: item.label,
+        hint: item.type === "oauth" ? "OAuth" : "API key",
+      })),
+    });
+    if (cancelled(choice)) return false;
+    await runProviderLogin(authPath, choice.providerId, choice.type);
     p.log.success("Login complete — credential stored for this profile");
     return true;
   } catch (error) {
@@ -466,7 +480,7 @@ Usage:
   autogent --help   this text
 
 Agents are configured here (kube context, namespace, image, pi extensions,
-storage, idle timeout + the mandatory pi/Anthropic OAuth login) and then
+storage, idle timeout + the mandatory pi provider login) and then
 selected in Buzz
 Desktop's provider form, which exposes only the profile drop-down.
 `;

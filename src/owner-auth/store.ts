@@ -12,14 +12,16 @@
  * write into it directly (`ModelRuntime.create({authPath})`) and the record
  * publication ships its raw bytes.
  *
- * ## 1:1 account↔agent rule
+ * ## 1:1 account↔agent rule (per provider)
  *
- * The plan pins one OAuth account to one agent. Anthropic's token response
- * carries no stable account id we can rely on, so the rule is enforced on the
- * strongest signal available: the refresh-token digest. Binding an account
- * that is already bound to a different agent is refused. (Logging in twice
- * with the same account yields distinct refresh tokens, which this cannot
- * catch — that residual hole is documented, not hidden.)
+ * The plan pins one provider account to one agent. Token responses carry no
+ * stable account id we can rely on, so the rule is enforced on the strongest
+ * signal available: a digest of the credential's long-lived secret — the
+ * OAuth refresh token, or the API key for api_key credentials — tracked per
+ * provider. Binding a credential that is already bound to a different agent
+ * is refused. (Logging in twice with the same OAuth account yields distinct
+ * refresh tokens, which this cannot catch — that residual hole is
+ * documented, not hidden.)
  *
  * The plan asks for the OS keyring with a 0600-file fallback; v1 ships the
  * file backend behind this module's API so a keyring backend can be added
@@ -46,7 +48,11 @@ function bindingsPath(root: string): string {
 export interface AccountBinding {
   agentPubkey: string;
   providerId: string;
-  /** SHA-256 of the refresh token at binding time — the 1:1 discriminator. */
+  /**
+   * SHA-256 of the credential's long-lived secret (OAuth refresh token or
+   * API key) at binding time — the 1:1 discriminator. The field name is
+   * historical: it predates api_key support and stays for on-disk compat.
+   */
   refreshDigest: string;
   createdAt: number;
 }
@@ -85,14 +91,33 @@ export async function writeBindings(file: BindingsFile, root = ownerAuthRoot()):
   await writeFileAtomic(bindingsPath(root), `${JSON.stringify(file, null, 2)}\n`, 0o600);
 }
 
-export function refreshDigestOf(authJson: string): string | null {
+export interface CredentialDigest {
+  providerId: string;
+  digest: string;
+}
+
+/**
+ * SHA-256 of each provider's long-lived secret in a pi `auth.json` document:
+ * the refresh token for OAuth credentials, the key for api_key credentials.
+ * Entries without a usable secret are skipped.
+ */
+export function credentialDigestsOf(authJson: string): CredentialDigest[] {
   try {
-    const parsed = JSON.parse(authJson) as Record<string, { refresh?: unknown }>;
-    const refresh = parsed["anthropic"]?.refresh;
-    if (typeof refresh !== "string" || refresh === "") return null;
-    return createHash("sha256").update(refresh, "utf8").digest("hex");
+    const parsed = JSON.parse(authJson) as Record<string, unknown>;
+    const digests: CredentialDigest[] = [];
+    for (const [providerId, credential] of Object.entries(parsed)) {
+      if (typeof credential !== "object" || credential === null) continue;
+      const record = credential as Record<string, unknown>;
+      const secret = record["type"] === "api_key" ? record["key"] : record["refresh"];
+      if (typeof secret !== "string" || secret === "") continue;
+      digests.push({
+        providerId,
+        digest: createHash("sha256").update(secret, "utf8").digest("hex"),
+      });
+    }
+    return digests;
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -124,8 +149,10 @@ export async function writeAgentAuth(
 }
 
 /**
- * Enforces the 1:1 account↔agent rule before recording a binding.
- * Returns the conflicting binding when the account is already taken.
+ * Enforces the per-provider 1:1 account↔agent rule before recording bindings.
+ * The full `auth.json` replaces the agent's binding set — one entry per
+ * provider credential in the file. Returns the first conflicting binding when
+ * any credential is already bound to a different agent.
  */
 export async function recordBinding(
   agentPubkey: string,
@@ -133,24 +160,28 @@ export async function recordBinding(
   root = ownerAuthRoot(),
   now: () => number = () => Date.now(),
 ): Promise<{ ok: true } | { ok: false; conflict: AccountBinding }> {
-  const digest = refreshDigestOf(authJson);
+  const digests = credentialDigestsOf(authJson);
   const file = await readBindings(root);
-  if (digest !== null) {
+  for (const { providerId, digest } of digests) {
     const conflict = file.bindings.find(
-      (binding) => binding.refreshDigest === digest && binding.agentPubkey !== agentPubkey,
+      (binding) =>
+        binding.providerId === providerId &&
+        binding.refreshDigest === digest &&
+        binding.agentPubkey !== agentPubkey,
     );
     if (conflict) return { ok: false, conflict };
   }
+  const createdAt = now();
   const next: BindingsFile = {
     version: 1,
     bindings: [
       ...file.bindings.filter((binding) => binding.agentPubkey !== agentPubkey),
-      {
+      ...digests.map(({ providerId, digest }) => ({
         agentPubkey,
-        providerId: "anthropic",
-        refreshDigest: digest ?? "",
-        createdAt: now(),
-      },
+        providerId,
+        refreshDigest: digest,
+        createdAt,
+      })),
     ],
   };
   await writeBindings(next, root);
