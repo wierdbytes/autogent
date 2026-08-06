@@ -74,6 +74,59 @@ Buzz Desktop → Deploy. Провайдер: новый generation-Secret → з
 крайняя мера: агент получит SIGTERM и корректно попрощается (бюджет 60s),
 но Desktop не узнает, что остановка была намеренной.
 
+### Достать файл сессии для дебага
+
+Транскрипт Pi-сессии — это `.jsonl` (каждая строка — event/message), полезен
+для разбора «что модель видела и почему так ответила».
+
+**1. Профиль → pubkey → Pod.** Имя Pod'а строится из pubkey, не из имени
+профиля. Маппинг лежит в реестре на owner-машине:
+
+```bash
+python3 -c "import json;print({p['name']:p.get('agentPubkey') for p in json.load(open('$HOME/.config/autogent/registry.json'))['profiles']})"
+# Pod = autogent-<первые 12 символов pubkey>, например autogent-139206ac2fb8
+```
+
+**2. Найти файлы сессий внутри Pod'а.** Pi SDK пишет транскрипты **не на
+PVC**, а в home контейнера:
+
+```bash
+kubectl -n autogent exec autogent-<pubkey12> -- \
+  sh -c 'find $HOME/.pi/agent/sessions -name "*.jsonl"'
+# → /home/agent/.pi/agent/sessions/--data-workspace--/<timestamp>_<session-id>.jsonl
+```
+
+Если файлов несколько (несколько каналов), маппинг «канал → файл» хранится в
+SQLite на PVC: `/data/state/agent.db`, таблица channels (колонка с
+`pi_session_path`; пишется в `session-registry.ts` → `setPiSession`).
+
+**3. Скопировать на owner-машину.** Через `cat` (не требует `tar` в образе,
+в отличие от `kubectl cp`):
+
+```bash
+kubectl -n autogent exec autogent-<pubkey12> -- \
+  cat '/home/agent/.pi/agent/sessions/--data-workspace--/<файл>.jsonl' \
+  > ~/me/tmp/<профиль>-session.jsonl
+```
+
+Все сессии разом:
+
+```bash
+kubectl -n autogent exec autogent-<pubkey12> -- \
+  sh -c 'cd $HOME/.pi/agent/sessions && tar cf - .' | tar xf - -C <куда>
+```
+
+**4. Изучать.** Формат — Pi session v3: строка 0 — заголовок (`type:
+"session"`, id, cwd), дальше `model_change` / `thinking_level_change` /
+`message`. Открыть локально: `pi --session <файл>.jsonl`, либо построчно
+через `jq`.
+
+**Нюанс — файл смертен.** Он живёт в `/home/agent` (файловая система
+контейнера), а не на PVC: пересоздание Pod'а его уничтожает, при этом SQLite
+на PVC продолжит ссылаться на несуществующий путь (тогда registry молча
+откроет свежую сессию — `#open` в `session-registry.ts`). Ценные транскрипты
+забирать сразу, пока Pod жив.
+
 ### Langfuse tracing
 
 Опционально агент шлёт трейсы в Langfuse (cloud или self-hosted): один trace
@@ -164,4 +217,5 @@ I/O может содержать содержимое файлов и выво�
 | OAuth-креды | config-запись `autogent/auth` + `~/.config/autogent/agents/<pubkey>/auth.json` на owner-машине |
 | Langfuse-ключи | config-запись `autogent/langfuse` (kind 30078), NIP-44-шифртекст к собственному ключу агента; owner управляет `autogent-nostr langfuse set/status/revoke` |
 | состояние/workspace | PVC `autogent-<pubkey12>-data`, смонтирован в `/data` |
+| транскрипты Pi-сессий | `/home/agent/.pi/agent/sessions/--data-workspace--/*.jsonl` — **вне PVC**, гибнут с Pod'ом; см. «Достать файл сессии для дебага» |
 | образ | `ghcr.io/wierdbytes/autogent` (тег резолвится в digest при деплое; Pod всегда digest-pinned) |
