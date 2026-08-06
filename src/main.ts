@@ -18,7 +18,7 @@ import { mkdirSync } from "node:fs";
 import { applyEnv, defaultConfig, validateConfig, type AgentConfig } from "./config.js";
 import { RecordClient } from "./nostr/record-client.js";
 import { createEventBuilder } from "./nostr/event-builder.js";
-import { CONFIG_SLUG, AUTH_SLUG } from "./nostr/config-records.js";
+import { CONFIG_SLUG, AUTH_SLUG, LANGFUSE_SLUG } from "./nostr/config-records.js";
 import { RelaySupervisor } from "./nostr/relay-supervisor.js";
 import { bootstrapIdentityFromEnv } from "./provisioning/bootstrap.js";
 import { createIdentityStore } from "./provisioning/identity-store.js";
@@ -27,7 +27,14 @@ import { AppRuntime, type RemoteRuntimeOptions } from "./runtime/app-runtime.js"
 import { systemClock } from "./runtime/clock.js";
 import { createLogger } from "./runtime/logger.js";
 import type { Logger, RelayPort } from "./runtime/ports.js";
-import { authContentFromValue, authValueFromContent, piAgentDir, reconcileProviderAuth, recordAuthSynced } from "./runtime/provider-auth.js";
+import {
+  authContentFromValue,
+  authValueFromContent,
+  langfuseCredentialsFromValue,
+  piAgentDir,
+  reconcileProviderAuth,
+  recordAuthSynced,
+} from "./runtime/provider-auth.js";
 import { applyCoreConfig, parseCoreConfig } from "./runtime/remote-config.js";
 import type { Signer } from "./nostr/signer.js";
 import type { AuthTag } from "./nostr/nip-oa.js";
@@ -153,6 +160,24 @@ async function bootstrapRemote(
       break;
   }
 
+  // --- langfuse credentials head -----------------------------------------
+  // Optional by design (tracing plan §5.2): no head, a tombstone or a
+  // malformed value all mean "no keys", never degraded — tracing simply stays
+  // a no-op and the agent answers exactly as before.
+  const langfuseHead = await records.fetchHead(LANGFUSE_SLUG);
+  const langfuseCredentials =
+    langfuseHead && langfuseHead.body.slug === LANGFUSE_SLUG
+      ? langfuseCredentialsFromValue(langfuseHead.body.value)
+      : null;
+  if (langfuseHead) {
+    logger.info("langfuse credentials record head found", {
+      createdAt: langfuseHead.createdAt,
+      credentials: langfuseCredentials === null ? "revoked" : "present",
+    });
+  } else {
+    logger.debug("no langfuse credentials record head");
+  }
+
   return {
     config: effective,
     relay,
@@ -162,6 +187,8 @@ async function bootstrapRemote(
       missing: { core: missingCore, providerAuth: missingAuth },
       coreHeadCreatedAt,
       authHeadCreatedAt,
+      langfuseCredentials,
+      langfuseHeadCreatedAt: langfuseHead?.createdAt ?? 0,
     },
   };
 }

@@ -13,6 +13,7 @@ import type { RecordClient } from "../nostr/record-client.js";
 import {
   CONFIG_SLUG,
   AUTH_SLUG,
+  LANGFUSE_SLUG,
   type RecordHead,
 } from "../nostr/config-records.js";
 import {
@@ -20,6 +21,8 @@ import {
   authValueFromContent,
   digestOf,
   langfuseCredentialsFromEnv,
+  langfuseCredentialsFromValue,
+  type LangfuseCredentials,
   materializeAuth,
   readLocalAuth,
   recordAuthSynced,
@@ -93,6 +96,12 @@ const PRE_LIVE_PHASES: ReadonlySet<RuntimePhase> = new Set<RuntimePhase>([
 export const SHUTDOWN_FINALIZE_RESERVE_MS = 7_000;
 
 /**
+ * Ceiling on draining the outgoing trace exporter when the port is swapped at
+ * runtime (revoked keys, tracing switched off). A config push must stay fast.
+ */
+const TRACING_SWAP_BUDGET_MS = 3_000;
+
+/**
  * Remote (record-configured) mode, prepared by `main.ts` (remote plan §3).
  *
  * The initial head fetch happens before the runtime is constructed — the
@@ -107,6 +116,13 @@ export interface RemoteRuntimeOptions {
   missing: { core: boolean; providerAuth: boolean };
   coreHeadCreatedAt: number;
   authHeadCreatedAt: number;
+  /**
+   * Langfuse API keys from the `autogent/langfuse` head, or null when the head
+   * is absent, tombstoned or malformed. Absence is not degraded: tracing is
+   * optional, so the agent simply runs without it (tracing plan §5.2).
+   */
+  langfuseCredentials: LangfuseCredentials | null;
+  langfuseHeadCreatedAt: number;
 }
 
 export interface AppRuntimeOptions {
@@ -147,7 +163,25 @@ export class AppRuntime {
   readonly #state: AgentState;
   readonly #relay: RelayPort;
   readonly #telemetry: ObserverPublisher;
-  readonly #tracing: TracingPort;
+  /**
+   * Swappable at runtime: a Langfuse key revocation or an `enabled` flip in the
+   * core record replaces the port on live actors, which reach it through
+   * `#tracingDelegate` rather than holding this reference.
+   */
+  #tracing: TracingPort;
+  /** True when a test injected the port; hot-reload must not overwrite it. */
+  readonly #tracingInjected: boolean;
+  /** One warn per "enabled but keyless" transition, never a flood. */
+  #langfuseWarned = false;
+  /** Stable `TracingPort` handed to actors; every call re-reads `#tracing`. */
+  readonly #tracingDelegate: TracingPort = {
+    turnStarted: (route, info) => this.#tracing.turnStarted(route, info),
+    event: (turnId, event) => this.#tracing.event(turnId, event),
+    steering: (turnId, text, authorPubkey) => this.#tracing.steering(turnId, text, authorPubkey),
+    turnFinished: (turnId, outcome) => this.#tracing.turnFinished(turnId, outcome),
+    flush: () => this.#tracing.flush(),
+    shutdown: (budgetMs) => this.#tracing.shutdown(budgetMs),
+  };
   readonly #usageTracker: UsageTracker;
   readonly #usagePublisher: UsagePublisher;
   readonly #outboxPublisher: OutboxPublisher;
@@ -164,6 +198,9 @@ export class AppRuntime {
   readonly #missing = { core: false, providerAuth: false };
   #coreHeadCreatedAt = 0;
   #authHeadCreatedAt = 0;
+  #langfuseHeadCreatedAt = 0;
+  /** Record-sourced Langfuse keys; they outrank env (tracing plan §5.2). */
+  #langfuseCredentials: LangfuseCredentials | null = null;
   #stopAuthWatcher: (() => void) | null = null;
   readonly #inactivity: InactivityMonitor;
   readonly #gitProxy: GitAuthProxy;
@@ -184,6 +221,8 @@ export class AppRuntime {
       this.#missing.providerAuth = this.#remote.missing.providerAuth;
       this.#coreHeadCreatedAt = this.#remote.coreHeadCreatedAt;
       this.#authHeadCreatedAt = this.#remote.authHeadCreatedAt;
+      this.#langfuseHeadCreatedAt = this.#remote.langfuseHeadCreatedAt;
+      this.#langfuseCredentials = this.#remote.langfuseCredentials;
     }
     this.#clock = options.clock ?? systemClock;
     this.#signer = options.signer;
@@ -218,6 +257,7 @@ export class AppRuntime {
       coalesceWindowMs: this.#config.telemetry.coalesceMs,
     });
 
+    this.#tracingInjected = options.tracing !== undefined;
     this.#tracing = options.tracing ?? this.#createTracing();
 
     this.#usageTracker = new UsageTracker({
@@ -314,7 +354,10 @@ export class AppRuntime {
       relayId: this.#config.relayId,
       state: this.#state,
       telemetry: this.#telemetry,
-      tracing: this.#tracing,
+      // A delegate, not the port itself: actors capture their deps once at
+      // creation, and a revoked key must switch tracing off on the actors that
+      // already exist, not only on the next one.
+      tracing: this.#tracingDelegate,
       output,
       sessions: this.#sessions,
       clock: this.#clock,
@@ -385,13 +428,21 @@ export class AppRuntime {
   #createTracing(): TracingPort {
     const langfuse = this.#config.telemetry.langfuse;
     if (!langfuse.enabled) return new NoopTracingPort();
-    const credentials = langfuseCredentialsFromEnv();
+    const credentials = this.#langfuseCredentials ?? langfuseCredentialsFromEnv();
     if (credentials === null) {
+      this.#langfuseWarned = true;
       this.#logger.warn("langfuse tracing enabled but credentials missing; tracing disabled");
       return new NoopTracingPort();
     }
+    return this.#newLangfusePublisher(langfuse, credentials);
+  }
+
+  #newLangfusePublisher(
+    config: AgentConfig["telemetry"]["langfuse"],
+    credentials: LangfuseCredentials,
+  ): LangfusePublisher {
     return new LangfusePublisher({
-      config: langfuse,
+      config,
       credentials,
       relayId: this.#config.relayId,
       // The deployment mode is the useful default: record-configured agents run
@@ -402,8 +453,54 @@ export class AppRuntime {
     });
   }
 
+  /**
+   * Reconciles the live trace sink with config and credentials.
+   *
+   * One place decides, so a core-record push and a Langfuse-key push cannot
+   * disagree about what the port should be. The swap happens before the old
+   * pipeline is drained: an actor starting a turn during the shutdown must
+   * already see the new port.
+   */
+  async #syncTracing(): Promise<void> {
+    if (this.#tracingInjected) return;
+    const langfuse = this.#config.telemetry.langfuse;
+    const credentials = this.#langfuseCredentials ?? langfuseCredentialsFromEnv();
+    const current = this.#tracing;
+
+    if (!langfuse.enabled || credentials === null) {
+      if (langfuse.enabled && !this.#langfuseWarned) {
+        this.#langfuseWarned = true;
+        this.#logger.warn("langfuse tracing enabled but credentials missing; tracing disabled");
+      }
+      if (!(current instanceof LangfusePublisher)) return;
+      this.#tracing = new NoopTracingPort();
+      // Bounded: a dead exporter must not hold a config push hostage.
+      await current.shutdown(TRACING_SWAP_BUDGET_MS);
+      this.#logger.info("langfuse tracing disabled", {
+        reason: langfuse.enabled ? "credentials_revoked" : "config_disabled",
+      });
+      return;
+    }
+
+    this.#langfuseWarned = false;
+    if (current instanceof LangfusePublisher) {
+      current.reconfigure({ config: langfuse, credentials });
+      return;
+    }
+    this.#tracing = this.#newLangfusePublisher(langfuse, credentials);
+    this.#logger.info("langfuse tracing enabled");
+  }
+
   get phase(): RuntimePhase {
     return this.#phase;
+  }
+
+  /**
+   * Which trace sink is live. Diagnostic surface (and the seam tests assert on):
+   * the port itself stays private so nothing can reach into it.
+   */
+  get tracingKind(): "langfuse" | "noop" {
+    return this.#tracing instanceof LangfusePublisher ? "langfuse" : "noop";
   }
 
   /** True while a required record head is missing or revoked (plan §6.2.8). */
@@ -736,8 +833,9 @@ export class AppRuntime {
     const remote = this.#remote;
     if (!remote) return;
 
-    remote.records.subscribe([CONFIG_SLUG, AUTH_SLUG], (slug, head) => {
+    remote.records.subscribe([CONFIG_SLUG, AUTH_SLUG, LANGFUSE_SLUG], (slug, head) => {
       if (slug === CONFIG_SLUG) void this.#onCoreRecord(head);
+      else if (slug === LANGFUSE_SLUG) void this.#onLangfuseRecord(head);
       else void this.#onAuthRecord(head);
     });
 
@@ -782,6 +880,9 @@ export class AppRuntime {
     });
     this.#config = { ...next, stateDir: this.#config.stateDir, relayUrl: this.#config.relayUrl };
     this.#inactivity.arm(next.lifecycle.inactivityExitSec);
+    // Reads the config that was just installed, so an `enabled` flip or a new
+    // host/privacy/sample binds without a restart (tracing plan §5.3).
+    await this.#syncTracing();
 
     this.#logger.info("core record applied", { createdAt: head.createdAt });
     if (this.#missing.core) {
@@ -821,6 +922,32 @@ export class AppRuntime {
       this.#missing.providerAuth = false;
       this.#maybeLeaveDegraded();
     }
+  }
+
+  /**
+   * Applies a newer `autogent/langfuse` head (tracing plan §5.2).
+   *
+   * A tombstone (or any unusable value) means the owner revoked the keys:
+   * tracing goes off on the live actors immediately, and the agent keeps
+   * answering — observability is never load-bearing.
+   */
+  async #onLangfuseRecord(head: RecordHead): Promise<void> {
+    if (head.createdAt <= this.#langfuseHeadCreatedAt) return;
+    if (head.body.slug !== LANGFUSE_SLUG) return;
+    this.#langfuseHeadCreatedAt = head.createdAt;
+
+    const credentials = langfuseCredentialsFromValue(head.body.value);
+    if (credentials === null) {
+      this.#logger.warn("langfuse credentials revoked; tracing disabled", {
+        createdAt: head.createdAt,
+      });
+    } else {
+      this.#logger.info("langfuse credentials record applied", { createdAt: head.createdAt });
+    }
+    // Stored even while tracing is switched off in config: a later `enabled`
+    // push must not need a second key publication.
+    this.#langfuseCredentials = credentials;
+    await this.#syncTracing();
   }
 
   /** Publishes a pi OAuth refresh back to the relay (plan §3.2 write-back). */

@@ -144,6 +144,8 @@ async function bootRemote(options: {
       missing: options.missing ?? { core: false, providerAuth: false },
       coreHeadCreatedAt: 0,
       authHeadCreatedAt: 0,
+      langfuseCredentials: null,
+      langfuseHeadCreatedAt: 0,
     },
   });
 
