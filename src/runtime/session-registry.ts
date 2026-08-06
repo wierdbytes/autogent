@@ -28,6 +28,8 @@ interface SdkSession {
   isStreaming: boolean;
   isIdle: boolean;
   model: { id?: string; provider?: string; contextWindow?: number } | undefined;
+  /** `get systemPrompt(): string` in the real SDK; optional so fakes stay minimal. */
+  systemPrompt?: string;
   prompt(text: string, options?: Record<string, unknown>): Promise<void>;
   steer(text: string): Promise<void>;
   abort(): Promise<void>;
@@ -89,6 +91,10 @@ class PiSessionAdapter implements AgentSessionHandle {
     const model = this.session.model;
     if (!model?.id) return undefined;
     return model.provider ? `${model.provider}/${model.id}` : model.id;
+  }
+  /** The effective prompt, including per-turn extension modifications. */
+  get systemPrompt(): string | undefined {
+    return this.session.systemPrompt;
   }
   get contextWindow(): number | undefined {
     const window = this.session.model?.contextWindow;

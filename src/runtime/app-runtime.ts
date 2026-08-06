@@ -53,7 +53,8 @@ import { InactivityMonitor } from "./inactivity.js";
 import { systemClock } from "./clock.js";
 import { canonicalThreadRoot } from "./conversation-key.js";
 import { OutputRouter } from "./output-router.js";
-import type { Clock, Logger, RelayPort, SessionRegistryPort } from "./ports.js";
+import type { Clock, Logger, RelayPort, SessionRegistryPort, TracingPort } from "./ports.js";
+import { NoopTracingPort } from "./ports.js";
 import { Semaphore } from "./scheduler.js";
 import { SessionRegistry } from "./session-registry.js";
 import type { TurnContext } from "./turn-context.js";
@@ -122,6 +123,11 @@ export interface AppRuntimeOptions {
   /** Injected by tests; production creates real Pi sessions through the SDK. */
   sessions?: SessionRegistryPort;
   /**
+   * Turn trace sink. Supplied when Langfuse is enabled; tests and the default
+   * local mode run on the no-op port, so tracing never changes behaviour.
+   */
+  tracing?: TracingPort;
+  /**
    * Agent secret as 64-char hex, for the buzz CLI broker only (buzz-cli plan
    * §3). Absent in tests — the broker is simply not started then.
    */
@@ -139,6 +145,7 @@ export class AppRuntime {
   readonly #state: AgentState;
   readonly #relay: RelayPort;
   readonly #telemetry: ObserverPublisher;
+  readonly #tracing: TracingPort;
   readonly #usageTracker: UsageTracker;
   readonly #usagePublisher: UsagePublisher;
   readonly #outboxPublisher: OutboxPublisher;
@@ -208,6 +215,8 @@ export class AppRuntime {
       logger: this.#logger.child({ component: "telemetry" }),
       coalesceWindowMs: this.#config.telemetry.coalesceMs,
     });
+
+    this.#tracing = options.tracing ?? new NoopTracingPort();
 
     this.#usageTracker = new UsageTracker({
       sessions: this.#state.sessions,
@@ -303,6 +312,7 @@ export class AppRuntime {
       relayId: this.#config.relayId,
       state: this.#state,
       telemetry: this.#telemetry,
+      tracing: this.#tracing,
       output,
       sessions: this.#sessions,
       clock: this.#clock,
@@ -466,6 +476,14 @@ export class AppRuntime {
     }
     await this.#withDeadline(this.#telemetry.flush(), drainDeadline, "telemetry-flush");
     this.#telemetry.close();
+    // The exporter gets its own ceiling on top of the drain deadline: a slow
+    // tracing backend must not eat the k8s grace budget (plan §7).
+    const tracingBudgetMs = Math.max(0, Math.min(5_000, drainDeadline - this.#clock.now()));
+    await this.#withDeadline(
+      this.#tracing.shutdown(tracingBudgetMs),
+      drainDeadline,
+      "tracing-shutdown",
+    );
     await this.#withDeadline(this.#outboxPublisher.stop(), drainDeadline, "outbox-stop");
 
     this.#buzzBroker?.close();

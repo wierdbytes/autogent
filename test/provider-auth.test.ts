@@ -7,6 +7,8 @@ import {
   authFilePath,
   digestOf,
   isPlausibleAuthJson,
+  langfuseCredentialsFromEnv,
+  langfuseCredentialsFromValue,
   materializeAuth,
   piAgentDir,
   readLocalAuth,
@@ -101,6 +103,50 @@ describe("provider-auth materialisation", () => {
     expect(isPlausibleAuthJson(AUTH_V1)).toBe(true);
     expect(isPlausibleAuthJson("[]")).toBe(false);
     expect(isPlausibleAuthJson("nope")).toBe(false);
+  });
+});
+
+describe("langfuse credentials", () => {
+  it("reads both standard env variables", () => {
+    expect(
+      langfuseCredentialsFromEnv({ LANGFUSE_PUBLIC_KEY: "pk-lf-1", LANGFUSE_SECRET_KEY: "sk-lf-1" }),
+    ).toEqual({ publicKey: "pk-lf-1", secretKey: "sk-lf-1" });
+  });
+
+  it("trims surrounding whitespace", () => {
+    expect(
+      langfuseCredentialsFromEnv({ LANGFUSE_PUBLIC_KEY: " pk-lf-1 ", LANGFUSE_SECRET_KEY: "sk-lf-1\n" }),
+    ).toEqual({ publicKey: "pk-lf-1", secretKey: "sk-lf-1" });
+  });
+
+  it("treats a half-configured or empty env as absent", () => {
+    expect(langfuseCredentialsFromEnv({ LANGFUSE_PUBLIC_KEY: "pk-lf-1" })).toBeNull();
+    expect(langfuseCredentialsFromEnv({ LANGFUSE_SECRET_KEY: "sk-lf-1" })).toBeNull();
+    expect(langfuseCredentialsFromEnv({})).toBeNull();
+    expect(
+      langfuseCredentialsFromEnv({ LANGFUSE_PUBLIC_KEY: "  ", LANGFUSE_SECRET_KEY: "sk-lf-1" }),
+    ).toBeNull();
+  });
+
+  it("parses a well-formed record value", () => {
+    expect(langfuseCredentialsFromValue({ public_key: "pk-lf-2", secret_key: "sk-lf-2" })).toEqual({
+      publicKey: "pk-lf-2",
+      secretKey: "sk-lf-2",
+    });
+  });
+
+  it("treats a tombstone and any malformed shape as no credentials", () => {
+    // null is the owner's revocation tombstone.
+    expect(langfuseCredentialsFromValue(null)).toBeNull();
+    expect(langfuseCredentialsFromValue(undefined)).toBeNull();
+    expect(langfuseCredentialsFromValue(["pk", "sk"])).toBeNull();
+    expect(langfuseCredentialsFromValue("pk-lf-2")).toBeNull();
+    expect(langfuseCredentialsFromValue({})).toBeNull();
+    expect(langfuseCredentialsFromValue({ public_key: "pk-lf-2" })).toBeNull();
+    expect(langfuseCredentialsFromValue({ secret_key: "sk-lf-2" })).toBeNull();
+    expect(langfuseCredentialsFromValue({ public_key: "", secret_key: "sk-lf-2" })).toBeNull();
+    expect(langfuseCredentialsFromValue({ public_key: "pk-lf-2", secret_key: "   " })).toBeNull();
+    expect(langfuseCredentialsFromValue({ public_key: 1, secret_key: 2 })).toBeNull();
   });
 });
 

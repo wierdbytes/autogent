@@ -8,13 +8,16 @@
  * agent secret — the agent process and the owner-side deploy tooling, which
  * keeps the nsec by design — can read, address, or write one.
  *
- * Two records are stored this way:
+ * Three records are stored this way:
  *
  * - slug `autogent/config` — the agent's effective configuration: a versioned
  *   JSON document stored as-is in the body's `value` field;
  * - slug `autogent/auth` — a pi-compatible `auth.json` document stored as-is
  *   in the body's `value` field; `value: null` is a tombstone (read as
- *   absent).
+ *   absent);
+ * - slug `autogent/langfuse` — Langfuse API keys (`{ public_key, secret_key }`)
+ *   stored in the body's `value` field; `value: null` is a tombstone (tracing
+ *   turns itself off, the agent keeps running).
  *
  * Unlike the earlier NIP-AE engram channel (kind 30174), records carry no
  * `p` tag and no NIP-OA auth tag: nothing on the wire links the record — or
@@ -39,6 +42,13 @@ const SLUG_NAMESPACE = "autogent/";
 
 export const CONFIG_SLUG = "autogent/config";
 export const AUTH_SLUG = "autogent/auth";
+/**
+ * Slug `autogent/langfuse` — Langfuse API credentials (`{ public_key,
+ * secret_key }`), owner-managed exactly like `autogent/auth` (tracing plan
+ * §5.2). Unlike `autogent/config`, `value: null` is a legal tombstone: an
+ * agent without Langfuse keys is simply not tracing, never degraded.
+ */
+export const LANGFUSE_SLUG = "autogent/langfuse";
 
 export function isValidSlug(slug: string): boolean {
   if (Buffer.byteLength(slug, "utf8") > 255) return false;

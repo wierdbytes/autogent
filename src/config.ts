@@ -20,6 +20,14 @@ export type SubscribeMode = "mentions" | "all";
 /** What to do with an assistant message too large for one chat event. */
 export type OversizeOutputPolicy = "split" | "truncate" | "reject";
 
+/**
+ * How much of a turn reaches Langfuse (tracing plan §6).
+ *
+ * `metadata-only` — shapes and counters, no user text; `conversations` — prompts
+ * and completions but no tool payloads; `full` — everything, redaction aside.
+ */
+export type LangfusePrivacyPreset = "metadata-only" | "conversations" | "full";
+
 export interface PiConfig {
   /** Working directory for the agent's tools. Also the session bucket key. */
   cwd: string;
@@ -67,6 +75,28 @@ export interface SchedulerConfig {
   contextMessageLimit: number;
 }
 
+/**
+ * Langfuse trace export (tracing plan §5.1).
+ *
+ * Credentials are deliberately absent: `publicKey`/`secretKey` are resolved
+ * separately (runtime/provider-auth.ts) so they never land in a config object
+ * or a log line, matching the no-secrets invariant of this module.
+ */
+export interface LangfuseConfig {
+  enabled: boolean;
+  /** Ingestion host — cloud or self-hosted. */
+  host: string;
+  privacy: LangfusePrivacyPreset;
+  /** Fraction of turns traced, 0..1. */
+  sampleRate: number;
+  /**
+   * Langfuse environment label. Left unset here; the publisher resolves it as
+   * `remote.recordConfig ? "remote" : "local"` when emitting traces, so the
+   * default follows the deployment mode instead of being frozen at parse time.
+   */
+  environment?: string;
+}
+
 export interface TelemetryConfig {
   /** Publish NIP-AO kind 24200 frames to the owner. */
   enabled: boolean;
@@ -74,6 +104,7 @@ export interface TelemetryConfig {
   coalesceMs: number;
   /** Publish NIP-AM kind 44200 usage metrics. */
   metricsEnabled: boolean;
+  langfuse: LangfuseConfig;
 }
 
 export interface OutputConfig {
@@ -168,7 +199,17 @@ export function defaultConfig(): AgentConfig {
       maxTurnDurationSec: 7200,
       contextMessageLimit: 12,
     },
-    telemetry: { enabled: true, coalesceMs: 40, metricsEnabled: true },
+    telemetry: {
+      enabled: true,
+      coalesceMs: 40,
+      metricsEnabled: true,
+      langfuse: {
+        enabled: false,
+        host: "https://cloud.langfuse.com",
+        privacy: "conversations",
+        sampleRate: 1,
+      },
+    },
     output: { maxMessageBytes: 16_000, oversizePolicy: "split" },
     buzzCli: { enabled: true, denyCommands: [] },
     lifecycle: { inactivityExitSec: 0, shutdownBudgetSec: 60 },
@@ -209,6 +250,12 @@ function envList(name: string): string[] | undefined {
 }
 
 const RESPOND_TO_MODES: readonly RespondToMode[] = ["owner-only", "allowlist", "anyone", "nobody"];
+
+const LANGFUSE_PRIVACY_PRESETS: readonly LangfusePrivacyPreset[] = [
+  "metadata-only",
+  "conversations",
+  "full",
+];
 
 /**
  * Applies `AUTOGENT_*` (and the inherited `BUZZ_RELAY_URL`) over a base config.
@@ -256,6 +303,16 @@ export function applyEnv(base: AgentConfig, env = process.env): AgentConfig {
   next.telemetry.enabled = envBool("AUTOGENT_TELEMETRY") ?? next.telemetry.enabled;
   next.telemetry.metricsEnabled = envBool("AUTOGENT_METRICS") ?? next.telemetry.metricsEnabled;
   next.telemetry.coalesceMs = envNumber("AUTOGENT_TELEMETRY_COALESCE_MS") ?? next.telemetry.coalesceMs;
+
+  const langfuse = next.telemetry.langfuse;
+  langfuse.enabled = envBool("AUTOGENT_LANGFUSE") ?? langfuse.enabled;
+  langfuse.host = envString("AUTOGENT_LANGFUSE_HOST") ?? langfuse.host;
+  const langfusePrivacy = envString("AUTOGENT_LANGFUSE_PRIVACY") as LangfusePrivacyPreset | undefined;
+  if (langfusePrivacy && LANGFUSE_PRIVACY_PRESETS.includes(langfusePrivacy)) {
+    langfuse.privacy = langfusePrivacy;
+  }
+  langfuse.sampleRate = envNumber("AUTOGENT_LANGFUSE_SAMPLE") ?? langfuse.sampleRate;
+  langfuse.environment = envString("AUTOGENT_LANGFUSE_ENV") ?? langfuse.environment;
 
   next.presence.enabled = envBool("AUTOGENT_PRESENCE") ?? next.presence.enabled;
   next.profile.name = envString("AUTOGENT_PROFILE_NAME") ?? next.profile.name;
@@ -310,6 +367,18 @@ export function validateConfig(config: AgentConfig): string[] {
   }
   if (config.lifecycle.shutdownBudgetSec < 10) {
     problems.push("lifecycle.shutdownBudgetSec must be at least 10 seconds");
+  }
+  // Only a switched-on exporter is validated: a stale or garbage value behind
+  // `enabled: false` cannot affect the agent, and refusing to boot over it
+  // would be a needless outage.
+  if (config.telemetry.langfuse.enabled) {
+    const { host, sampleRate } = config.telemetry.langfuse;
+    if (!Number.isFinite(sampleRate) || sampleRate < 0 || sampleRate > 1) {
+      problems.push(`telemetry.langfuse.sampleRate must be between 0 and 1 (got ${sampleRate})`);
+    }
+    if (!/^https?:\/\//.test(host)) {
+      problems.push(`telemetry.langfuse.host must start with http:// or https:// (got ${host})`);
+    }
   }
   return problems;
 }

@@ -204,6 +204,59 @@ export async function reconcileProviderAuth(
 }
 
 /* -------------------------------------------------------------------------- */
+/* Langfuse credentials                                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Langfuse API keys (tracing plan §5.2).
+ *
+ * Kept out of `AgentConfig` on purpose: the config object is logged and echoed
+ * back to the owner, these keys are not. They also stay out of `autogent/auth`,
+ * which is materialised into pi's `auth.json` verbatim — foreign keys have no
+ * business in a file the pi SDK owns.
+ */
+export interface LangfuseCredentials {
+  publicKey: string;
+  secretKey: string;
+}
+
+function nonEmptyString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+/**
+ * Local mode: the Langfuse ecosystem's standard environment variables, so an
+ * existing `.env` works unchanged.
+ */
+export function langfuseCredentialsFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): LangfuseCredentials | null {
+  const publicKey = nonEmptyString(env["LANGFUSE_PUBLIC_KEY"]);
+  const secretKey = nonEmptyString(env["LANGFUSE_SECRET_KEY"]);
+  // Half a key pair is unusable; treat it as absent rather than half-configure.
+  if (!publicKey || !secretKey) return null;
+  return { publicKey, secretKey };
+}
+
+/**
+ * Parses the `value` of the `autogent/langfuse` record (kind 30078):
+ * `{ "public_key": "pk-lf-...", "secret_key": "sk-lf-..." }`.
+ *
+ * `null` is the tombstone the owner writes to revoke keys; it and any malformed
+ * shape resolve to "no credentials", which switches tracing off on the fly.
+ */
+export function langfuseCredentialsFromValue(value: unknown): LangfuseCredentials | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const object = value as Record<string, unknown>;
+  const publicKey = nonEmptyString(object["public_key"]);
+  const secretKey = nonEmptyString(object["secret_key"]);
+  if (!publicKey || !secretKey) return null;
+  return { publicKey, secretKey };
+}
+
+/* -------------------------------------------------------------------------- */
 /* Refresh watcher                                                            */
 /* -------------------------------------------------------------------------- */
 

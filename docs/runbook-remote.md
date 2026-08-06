@@ -74,6 +74,72 @@ Buzz Desktop → Deploy. Провайдер: новый generation-Secret → з
 крайняя мера: агент получит SIGTERM и корректно попрощается (бюджет 60s),
 но Desktop не узнает, что остановка была намеренной.
 
+### Langfuse tracing
+
+Опционально агент шлёт трейсы в Langfuse (cloud или self-hosted): один trace
+на turn, generation-observations с usage/cost на каждый вызов модели, span на
+каждый tool call, Nostr-метаданные (канал, автор, relay) для фильтрации
+(план: `docs/plans/20260806-langfuse-tracing.md`).
+
+**Включение.** Блок `langfuse` в конфиге агента (`autogent/config`, публикуется
+через `config publish`):
+
+```json
+{
+  "v": 1,
+  "langfuse": {
+    "enabled": true,
+    "host": "https://cloud.langfuse.com",
+    "privacy": "conversations",
+    "sample_rate": 1
+  }
+}
+```
+
+Для локального (нерелейного) режима те же поля задаются через
+`AUTOGENT_LANGFUSE` / `AUTOGENT_LANGFUSE_HOST` / `AUTOGENT_LANGFUSE_PRIVACY` /
+`AUTOGENT_LANGFUSE_SAMPLE` / `AUTOGENT_LANGFUSE_ENV`, а сами ключи — через
+стандартные для экосистемы Langfuse `LANGFUSE_PUBLIC_KEY` /
+`LANGFUSE_SECRET_KEY`.
+
+**Ключи (remote).** `enabled: true` в конфиге ещё не даёт агенту ключей —
+они едут отдельным каналом, ровно как `auth login/revoke`:
+
+```bash
+autogent-nostr langfuse set    --agent <pubkey>   # запрашивает pk-lf-.../sk-lf-... интерактивно,
+                                                    # либо --public-key/--secret-key
+autogent-nostr langfuse status --agent <pubkey>
+autogent-nostr langfuse revoke --agent <pubkey>    # tombstone
+```
+
+`set` публикует record `autogent/langfuse` (kind 30078, NIP-44-шифрован под
+self-key агента — как `autogent/auth`); работающий агент подхватывает его по
+живой подписке и переконфигурирует publisher без рестарта. `revoke`
+публикует tombstone (`value: null`): агент выключает tracing на лету и
+продолжает работать как обычно — это degrade только трейсинга, не самого
+агента. `status` печатает `created_at` головы и public key; secret key
+никогда не печатается (`sk-lf-***`).
+
+**Privacy-пресеты.** Выбираются владельцем при настройке профиля
+(`langfuse.privacy` в конфиге), enforced публикатором:
+
+| Поле | `metadata-only` | `conversations` (default) | `full` |
+| --- | :-: | :-: | :-: |
+| Nostr-метаданные, usage, cost, тайминги, имена tool'ов, error-флаги | ✅ | ✅ | ✅ |
+| prompt (input) и текст ответа (output) | — | ✅ | ✅ |
+| thinking, tool input/output | — | — | ✅ |
+| систем-промпт (полный эффективный) | — | — | ✅ |
+
+Default — `conversations`: агент читает чужие сообщения из каналов, а tool
+I/O может содержать содержимое файлов и вывод команд — это самый рискованный
+слой, поэтому `full` не default.
+
+**Fail-closed-degraded, но только для трейсинга.** `enabled: true` без
+разрешённых credentials (ни record, ни env) — один warn в лог, agent работает
+дальше как обычно, просто без трейсов (no-op tracing port). Это отличается от
+деградации самого агента (нет `autogent/config` или невалидные provider-креды) —
+отсутствие Langfuse-ключей никогда не блокирует промпты.
+
 ### Переезд в AKS
 
 1. `az aks get-credentials …` — новый контекст в kubeconfig.
@@ -96,5 +162,6 @@ Buzz Desktop → Deploy. Провайдер: новый generation-Secret → з
 | nsec | k8s Secret `autogent-<pubkey12>-<generation>` + OS keyring owner'а |
 | конфиг агента | config-запись `autogent/config` (kind 30078), NIP-44-шифртекст к собственному ключу агента |
 | OAuth-креды | config-запись `autogent/auth` + `~/.config/autogent/agents/<pubkey>/auth.json` на owner-машине |
+| Langfuse-ключи | config-запись `autogent/langfuse` (kind 30078), NIP-44-шифртекст к собственному ключу агента; owner управляет `autogent-nostr langfuse set/status/revoke` |
 | состояние/workspace | PVC `autogent-<pubkey12>-data`, смонтирован в `/data` |
 | образ | `ghcr.io/wierdbytes/autogent` (тег резолвится в digest при деплое; Pod всегда digest-pinned) |

@@ -29,6 +29,7 @@ import { initIdentity, initInstructions } from "./provisioning/init.js";
 import { formatUpResult, up } from "./backend/up.js";
 import { commandAuthLogin, commandAuthRevoke, commandAuthStatus } from "./owner-auth/cli.js";
 import { commandConfigPublish, commandConfigShow } from "./owner-auth/config-cli.js";
+import { commandLangfuseRevoke, commandLangfuseSet, commandLangfuseStatus } from "./owner-auth/langfuse-cli.js";
 import { ProfileReconciler } from "./nostr/profile.js";
 import { createEventBuilder } from "./nostr/event-builder.js";
 import { RelaySupervisor } from "./nostr/relay-supervisor.js";
@@ -54,6 +55,10 @@ Usage:
   autogent-nostr config show    --agent <pubkey> [--relay <url>] [--nsec-file <path>]
   autogent-nostr config publish --agent <pubkey> --file <config.json>
                                 [--relay <url>] [--nsec-file <path>]
+  autogent-nostr langfuse set    --agent <pubkey> [--public-key <pk-lf-...>]
+                                 [--secret-key <sk-lf-...>] [--relay <url>] [--nsec-file <path>]
+  autogent-nostr langfuse status --agent <pubkey> [--relay <url>] [--nsec-file <path>]
+  autogent-nostr langfuse revoke --agent <pubkey> [--relay <url>] [--nsec-file <path>]
   autogent-nostr profile sync
   autogent-nostr doctor
   autogent-nostr run
@@ -80,6 +85,15 @@ Commands:
                     (OWNER host — signs with the agent key, no redeploy needed;
                     the running agent reconfigures live). Plain 'config' prints
                     this host's env-derived local config.
+  langfuse set/status/revoke
+                    Bind Langfuse API keys to a remote agent (OWNER host):
+                    published as the autogent/langfuse config record (kind
+                    30078), read by the Pod live — set/revoke apply without a
+                    redeploy. Enabling tracing itself is a separate step, the
+                    config record's telemetry.langfuse block (or
+                    AUTOGENT_LANGFUSE* for a local agent) — keys alone do not
+                    turn tracing on, and revoking them turns it off even if
+                    tracing is still enabled in the config.
   profile sync      Republish kind 0 / kind 10100 if they are missing or stale.
   doctor            Check identity, permissions, configuration and Pi availability.
   run               Start the agent in the foreground (this process becomes it).
@@ -424,6 +438,21 @@ export async function main(argv: string[]): Promise<number> {
       if (sub === "show") return commandConfigShow(configFlags);
       if (sub === "publish") return commandConfigPublish(configFlags);
       process.stderr.write("unknown config subcommand; expected `show` or `publish` (or none)\n");
+      return 2;
+    }
+    case "langfuse": {
+      const sub = flags.positional[0];
+      const langfuseFlags = {
+        agent: flags.values.get("agent") ?? flags.positional[1],
+        relay: flags.values.get("relay"),
+        nsecFile: flags.values.get("nsec-file"),
+        publicKey: flags.values.get("public-key"),
+        secretKey: flags.values.get("secret-key"),
+      };
+      if (sub === "set") return commandLangfuseSet(langfuseFlags);
+      if (sub === "status") return commandLangfuseStatus(langfuseFlags);
+      if (sub === "revoke") return commandLangfuseRevoke(langfuseFlags);
+      process.stderr.write("unknown langfuse subcommand; expected `set`, `status` or `revoke`\n");
       return 2;
     }
     case "up":
