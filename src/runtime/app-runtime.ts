@@ -19,6 +19,7 @@ import {
   authContentFromValue,
   authValueFromContent,
   digestOf,
+  langfuseCredentialsFromEnv,
   materializeAuth,
   readLocalAuth,
   recordAuthSynced,
@@ -43,6 +44,7 @@ import { resolveToolPolicy, toPiToolConfig } from "../security/tool-policy.js";
 import { openDatabase } from "../state/database.js";
 import type { AgentState } from "../state/database.js";
 import { applyRecovery, planRecovery } from "../state/recovery.js";
+import { LangfusePublisher } from "../telemetry/langfuse-publisher.js";
 import { ObserverPublisher } from "../telemetry/observer-publisher.js";
 import { UsagePublisher } from "../telemetry/usage-publisher.js";
 import { UsageTracker } from "../telemetry/usage-tracker.js";
@@ -216,7 +218,7 @@ export class AppRuntime {
       coalesceWindowMs: this.#config.telemetry.coalesceMs,
     });
 
-    this.#tracing = options.tracing ?? new NoopTracingPort();
+    this.#tracing = options.tracing ?? this.#createTracing();
 
     this.#usageTracker = new UsageTracker({
       sessions: this.#state.sessions,
@@ -370,6 +372,33 @@ export class AppRuntime {
       isBusy: () => this.#registry.turnsInFlight > 0,
       onExpire: () => void this.stop("inactivity"),
       logger: this.#logger.child({ component: "inactivity" }),
+    });
+  }
+
+  /**
+   * Builds the trace sink from config (tracing plan §5.2).
+   *
+   * Fail-closed-degraded: tracing switched on without credentials is one warn
+   * and a no-op port, never a refusal to boot — an observability gap must not
+   * take the agent down.
+   */
+  #createTracing(): TracingPort {
+    const langfuse = this.#config.telemetry.langfuse;
+    if (!langfuse.enabled) return new NoopTracingPort();
+    const credentials = langfuseCredentialsFromEnv();
+    if (credentials === null) {
+      this.#logger.warn("langfuse tracing enabled but credentials missing; tracing disabled");
+      return new NoopTracingPort();
+    }
+    return new LangfusePublisher({
+      config: langfuse,
+      credentials,
+      relayId: this.#config.relayId,
+      // The deployment mode is the useful default: record-configured agents run
+      // in the cluster, everything else is someone's laptop.
+      defaultEnvironment: this.#config.remote.recordConfig ? "remote" : "local",
+      clock: this.#clock,
+      logger: this.#logger.child({ component: "langfuse" }),
     });
   }
 
