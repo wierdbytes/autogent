@@ -20,7 +20,7 @@ import { access, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import * as p from "@clack/prompts";
-import type { RespondToMode } from "../config.js";
+import type { LangfusePrivacyPreset, RespondToMode } from "../config.js";
 import {
   DEFAULT_IMAGE,
   DEFAULT_INACTIVITY_SECONDS,
@@ -41,9 +41,11 @@ import {
   PROFILE_NAME_RE,
   ensureProfileAuthDir,
   profileAuthPath,
+  readProfileLangfuseKeys,
   readProfiles,
   removeProfile,
   saveProfile,
+  writeProfileLangfuseKeys,
   type AgentSettings,
   type DeployProfile,
 } from "../registry/profiles.js";
@@ -82,7 +84,27 @@ function deployedHint(profile: DeployProfile, loggedIn: boolean): string {
   return parts.join(" · ");
 }
 
-function profileDetails(profile: DeployProfile, loggedIn: boolean): string {
+/** One line for the Langfuse axis: the settings plus whether keys are here. */
+function langfuseSummary(profile: DeployProfile, keysStored: boolean): string {
+  if (!profile.langfuseEnabled) return "disabled";
+  const settings = [
+    profile.langfusePrivacy ?? "conversations (default)",
+    profile.langfuseHost ?? "cloud.langfuse.com",
+    `sample ${profile.langfuseSampleRate ?? 1}`,
+  ].join(" · ");
+  // Missing keys are a warning, not an error: they may already be on the relay
+  // from `autogent-nostr langfuse set`, and the agent degrades to no tracing.
+  const keys = keysStored
+    ? "keys stored"
+    : "keys MISSING (set here or via autogent-nostr langfuse set)";
+  return `${settings} · ${keys}`;
+}
+
+function profileDetails(
+  profile: DeployProfile,
+  loggedIn: boolean,
+  langfuseKeysStored: boolean,
+): string {
   const prompt =
     profile.systemPrompt === null
       ? "(none)"
@@ -111,6 +133,7 @@ function profileDetails(profile: DeployProfile, loggedIn: boolean): string {
     `respond to:    ${profile.respondTo}${profile.respondTo === "allowlist" ? ` (${profile.respondToAllowlist.length} pubkey(s))` : ""}`,
     `tools:         ${tools}`,
     `scheduler:     ${profile.maxConcurrentTurns ?? "default"} turn(s) · ${profile.contextMessageLimit ?? "default"} context msg(s)`,
+    `langfuse:      ${langfuseSummary(profile, langfuseKeysStored)}`,
     `login:         ${loggedIn ? "OAuth credential stored" : "MISSING — deploy will refuse"}`,
     `identity:      ${profile.agentPubkey ?? "(bound at first deploy from Buzz)"}`,
   ].join("\n");
@@ -447,7 +470,7 @@ async function promptAgentSettings(
   );
   if (contextMessageLimit === undefined) return null;
 
-  return {
+  const base = {
     model,
     thinking,
     systemPrompt: systemPrompt.trim() === "" ? null : systemPrompt,
@@ -458,6 +481,132 @@ async function promptAgentSettings(
     maxConcurrentTurns,
     contextMessageLimit,
   };
+
+  const langfuse = await promptLangfuse(name, initial);
+  if (langfuse === null) return null;
+
+  return { ...base, ...langfuse };
+}
+
+const LANGFUSE_PRIVACY_OPTIONS: readonly { value: string; label: string; hint: string }[] = [
+  {
+    value: "metadata-only",
+    label: "metadata-only",
+    hint: "usage, cost, timings, tool names only",
+  },
+  { value: "conversations", label: "conversations", hint: "+ prompts and reply text (default)" },
+  { value: "full", label: "full", hint: "+ thinking, tool I/O, system prompt" },
+];
+
+type LangfuseSettings = Pick<
+  AgentSettings,
+  "langfuseEnabled" | "langfuseHost" | "langfusePrivacy" | "langfuseSampleRate"
+>;
+
+/**
+ * The Langfuse steps (tracing plan §5.3, §6). The settings travel in the core
+ * config record; the API keys do not — they are stored next to the profile's
+ * `auth.json` and published as their own record at deploy, which is why this
+ * step writes them as a side effect instead of returning them.
+ */
+async function promptLangfuse(
+  name: string,
+  initial: AgentSettings,
+): Promise<LangfuseSettings | null> {
+  const enabled = await p.confirm({
+    message: "Send traces to Langfuse?",
+    initialValue: initial.langfuseEnabled,
+  });
+  if (cancelled(enabled)) return null;
+  // Turning tracing off keeps host/privacy/sample as they were: re-enabling it
+  // later should not start from scratch.
+  if (!enabled) {
+    return {
+      langfuseEnabled: false,
+      langfuseHost: initial.langfuseHost,
+      langfusePrivacy: initial.langfusePrivacy,
+      langfuseSampleRate: initial.langfuseSampleRate,
+    };
+  }
+
+  const host = await p.text({
+    message: "Langfuse host (empty = Langfuse Cloud)",
+    placeholder: "https://cloud.langfuse.com",
+    initialValue: initial.langfuseHost ?? "",
+    validate: (value) => {
+      const trimmed = (value ?? "").trim();
+      if (trimmed === "") return undefined;
+      return /^https?:\/\/\S+$/.test(trimmed) ? undefined : "must be an http(s):// URL";
+    },
+  });
+  if (cancelled(host)) return null;
+
+  const privacy = await p.select({
+    message: "Trace privacy preset",
+    initialValue: initial.langfusePrivacy ?? "",
+    options: [
+      { value: "", label: "Runtime default", hint: "conversations" },
+      ...LANGFUSE_PRIVACY_OPTIONS,
+    ],
+  });
+  if (cancelled(privacy)) return null;
+
+  const sample = await p.text({
+    message: "Turn sampling rate 0..1 (empty = 1, trace everything)",
+    placeholder: "1",
+    initialValue: initial.langfuseSampleRate === null ? "" : String(initial.langfuseSampleRate),
+    validate: (value) => {
+      const trimmed = (value ?? "").trim();
+      if (trimmed === "") return undefined;
+      const parsed = Number(trimmed);
+      return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1
+        ? undefined
+        : "a number between 0 and 1, or empty";
+    },
+  });
+  if (cancelled(sample)) return null;
+
+  if (!(await promptLangfuseKeys(name))) return null;
+
+  return {
+    langfuseEnabled: true,
+    langfuseHost: host.trim() === "" ? null : host.trim(),
+    langfusePrivacy: privacy === "" ? null : (privacy as LangfusePrivacyPreset),
+    langfuseSampleRate: sample.trim() === "" ? null : Number(sample.trim()),
+  };
+}
+
+/** Captures/keeps the profile's Langfuse API keys. False = cancelled. */
+async function promptLangfuseKeys(name: string): Promise<boolean> {
+  const existing = await readProfileLangfuseKeys(name);
+  if (existing !== null) {
+    const replace = await p.confirm({
+      message: "Replace stored Langfuse API keys?",
+      initialValue: false,
+    });
+    if (cancelled(replace)) return false;
+    if (!replace) return true;
+  }
+
+  const publicKey = await p.text({
+    message: "Langfuse public key",
+    placeholder: "pk-lf-…",
+    validate: (value) => ((value ?? "").trim() === "" ? "required (usually pk-lf-…)" : undefined),
+  });
+  if (cancelled(publicKey)) return false;
+
+  const secretKey = await p.password({
+    message: "Langfuse secret key",
+    validate: (value) => ((value ?? "").trim() === "" ? "required (usually sk-lf-…)" : undefined),
+  });
+  if (cancelled(secretKey)) return false;
+
+  await writeProfileLangfuseKeys(name, {
+    publicKey: publicKey.trim(),
+    secretKey: secretKey.trim(),
+  });
+  p.log.success("Langfuse keys stored for this profile");
+  return true;
 }
 
 /**
@@ -557,7 +706,8 @@ async function profileMenu(name: string): Promise<void> {
     const profile = (await readProfiles()).find((candidate) => candidate.name === name);
     if (!profile) return;
     const loggedIn = await hasLogin(profile);
-    p.note(profileDetails(profile, loggedIn), `Profile '${profile.name}'`);
+    const langfuseKeys = (await readProfileLangfuseKeys(profile.name)) !== null;
+    p.note(profileDetails(profile, loggedIn, langfuseKeys), `Profile '${profile.name}'`);
 
     const action = await p.select({
       message: "Action",
@@ -781,9 +931,10 @@ Usage:
 Agents are configured here — the substrate (kube context, namespace, image,
 pi extensions, storage, idle timeout), the mandatory pi provider login and
 the agent settings (model, reasoning effort, system prompt, respond gate,
-tools, scheduler ceilings; model/effort offer only providers with a stored
-login) — and then selected in Buzz Desktop's provider form, which exposes
-only the profile drop-down.
+tools, scheduler ceilings, Langfuse tracing with its privacy preset and API
+keys; model/effort offer only providers with a stored login) — and then
+selected in Buzz Desktop's provider form, which exposes only the profile
+drop-down.
 `;
 
 export async function main(argv: string[]): Promise<number> {

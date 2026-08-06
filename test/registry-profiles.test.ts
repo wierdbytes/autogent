@@ -5,7 +5,7 @@
  * credential is adopted for the identity on first deploy.
  */
 
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,10 +26,14 @@ import {
   getProfile,
   markProfileDeployed,
   profileAuthPath,
+  profileLangfusePath,
   readProfileAuth,
+  readProfileLangfuseKeys,
   readProfiles,
   removeProfile,
+  removeProfileLangfuseKeys,
   saveProfile,
+  writeProfileLangfuseKeys,
   type DeployProfile,
 } from "../src/registry/profiles.js";
 import { mintAgent } from "./helpers/backend-request.js";
@@ -135,6 +139,55 @@ describe("profile registry", () => {
     });
   });
 
+  it("round-trips the Langfuse settings and normalizes junk to the defaults", async () => {
+    await saveProfile(
+      profile({
+        langfuseEnabled: true,
+        langfuseHost: "https://langfuse.internal",
+        langfusePrivacy: "full",
+        langfuseSampleRate: 0.25,
+      }),
+    );
+    expect(await getProfile("my-agent")).toMatchObject({
+      langfuseEnabled: true,
+      langfuseHost: "https://langfuse.internal",
+      langfusePrivacy: "full",
+      langfuseSampleRate: 0.25,
+    });
+
+    const mangled = profile({ langfuseEnabled: true }) as unknown as Record<string, unknown>;
+    mangled["langfusePrivacy"] = "bogus";
+    mangled["langfuseSampleRate"] = 2;
+    mangled["langfuseHost"] = "";
+    await writeFile(
+      join(root, "registry.json"),
+      JSON.stringify({ version: 1, profiles: [mangled] }),
+    );
+    expect(await getProfile("my-agent")).toMatchObject({
+      langfuseEnabled: true,
+      langfuseHost: null,
+      langfusePrivacy: null,
+      langfuseSampleRate: null,
+    });
+  });
+
+  it("defaults the Langfuse fields on profiles written before they existed", async () => {
+    const legacy = profile() as unknown as Record<string, unknown>;
+    for (const key of Object.keys(legacy)) {
+      if (key.startsWith("langfuse")) delete legacy[key];
+    }
+    await writeFile(
+      join(root, "registry.json"),
+      JSON.stringify({ version: 1, profiles: [legacy] }),
+    );
+    expect(await getProfile("my-agent")).toMatchObject({
+      langfuseEnabled: false,
+      langfuseHost: null,
+      langfusePrivacy: null,
+      langfuseSampleRate: null,
+    });
+  });
+
   it("reads an empty list from a missing or corrupt registry", async () => {
     expect(await readProfiles()).toEqual([]);
     await writeFile(join(root, "registry.json"), "{not json");
@@ -187,6 +240,41 @@ describe("credential adoption on first deploy", () => {
     expect((await adoptProfileCredential("my-agent", "a".repeat(64))).state).toBe("adopted");
     const conflict = await adoptProfileCredential("my-agent", "b".repeat(64));
     expect(conflict.state).toBe("conflict");
+  });
+
+  it("stores Langfuse keys 0600 next to auth.json and reads them back", async () => {
+    expect(await readProfileLangfuseKeys("my-agent")).toBeNull();
+    await writeProfileLangfuseKeys("my-agent", { publicKey: "pk-lf-1", secretKey: "sk-lf-1" });
+    expect(await readProfileLangfuseKeys("my-agent")).toEqual({
+      publicKey: "pk-lf-1",
+      secretKey: "sk-lf-1",
+    });
+    // Wire shape, so the deploy path can publish the value verbatim.
+    expect(JSON.parse(await readFile(profileLangfusePath("my-agent"), "utf8"))).toEqual({
+      public_key: "pk-lf-1",
+      secret_key: "sk-lf-1",
+    });
+    expect((await stat(profileLangfusePath("my-agent"))).mode & 0o777).toBe(0o600);
+
+    await removeProfileLangfuseKeys("my-agent");
+    expect(await readProfileLangfuseKeys("my-agent")).toBeNull();
+    // Removing twice is not an error.
+    await removeProfileLangfuseKeys("my-agent");
+  });
+
+  it("treats a malformed or half-filled langfuse.json as no keys", async () => {
+    await mkdir(join(root, "profiles", "my-agent"), { recursive: true });
+    await writeFile(profileLangfusePath("my-agent"), "{not json");
+    expect(await readProfileLangfuseKeys("my-agent")).toBeNull();
+    await writeFile(profileLangfusePath("my-agent"), JSON.stringify({ public_key: "pk-lf-1" }));
+    expect(await readProfileLangfuseKeys("my-agent")).toBeNull();
+  });
+
+  it("drops the Langfuse keys together with the profile directory", async () => {
+    await saveProfile(profile());
+    await writeProfileLangfuseKeys("my-agent", { publicKey: "pk-lf-1", secretKey: "sk-lf-1" });
+    expect(await removeProfile("my-agent")).toBe(true);
+    expect(await readProfileLangfuseKeys("my-agent")).toBeNull();
   });
 
   it("reads back the profile credential the wizard stored", async () => {

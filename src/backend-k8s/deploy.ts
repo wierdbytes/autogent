@@ -15,7 +15,11 @@
 import type { DeployPayload } from "../backend/payload.js";
 import { fail } from "../backend/wire.js";
 import { readAgentAuth } from "../owner-auth/store.js";
-import { adoptProfileCredential, type DeployProfile } from "../registry/profiles.js";
+import {
+  adoptProfileCredential,
+  readProfileLangfuseKeys,
+  type DeployProfile,
+} from "../registry/profiles.js";
 import type { K8sProviderConfig } from "./config.js";
 import { buildPodEnv, publishDeployRecords } from "./records.js";
 import { apply, deleteAndWait, getJson, listJson, type KubectlOptions } from "./kubectl.js";
@@ -86,6 +90,12 @@ export async function deployToK8s(input: K8sDeployInput): Promise<K8sDeployOutco
     );
   }
 
+  // Langfuse keys, unlike provider credentials, are never fail-closed: a
+  // profile with tracing enabled but no local keys is fine — they may already
+  // sit on the relay from `autogent-nostr langfuse set`, and an agent that
+  // finds none anywhere just logs one warn and traces nothing.
+  const langfuseKeys = profileName !== undefined ? await readProfileLangfuseKeys(profileName) : null;
+
   // 2. Records before substrate: the Pod reads them at first start. The
   //    profile's agent settings are the record's primary source (payload env
   //    and the payload model field are ignored by design); the payload's
@@ -96,6 +106,7 @@ export async function deployToK8s(input: K8sDeployInput): Promise<K8sDeployOutco
     inactivitySeconds: config.inactivitySeconds,
     extensions: config.extensions,
     providerAuthJson,
+    langfuseKeys,
   });
 
   // Tag → digest before any object exists: the Pod is always digest-pinned,

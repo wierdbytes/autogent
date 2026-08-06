@@ -18,11 +18,14 @@ import type { DeployPayload } from "../backend/payload.js";
 import { DEFAULT_AGENT_SETTINGS, type AgentSettings } from "../registry/profiles.js";
 import { RecordClient } from "../nostr/record-client.js";
 import { createEventBuilder } from "../nostr/event-builder.js";
-import { CONFIG_SLUG, AUTH_SLUG } from "../nostr/config-records.js";
+import { CONFIG_SLUG, AUTH_SLUG, LANGFUSE_SLUG } from "../nostr/config-records.js";
 import { RelaySupervisor } from "../nostr/relay-supervisor.js";
 import { createSigner } from "../nostr/signer.js";
 import { fail } from "../backend/wire.js";
-import { authValueFromContent } from "../runtime/provider-auth.js";
+import {
+  authValueFromContent,
+  type LangfuseCredentials,
+} from "../runtime/provider-auth.js";
 import { systemClock } from "../runtime/clock.js";
 import { nullLogger } from "../runtime/logger.js";
 import type { CoreConfigV1 } from "../runtime/remote-config.js";
@@ -96,6 +99,21 @@ export function buildCoreConfig(
     };
   }
 
+  // Tracing is emitted only when the profile turned it on. A disabled profile
+  // emits no `langfuse` block at all: absence means "runtime defaults", and the
+  // runtime default is disabled — so the two agree, and the record stays as
+  // small as the profile's intent.
+  if (settings.langfuseEnabled) {
+    config.langfuse = {
+      enabled: true,
+      ...(settings.langfuseHost !== null ? { host: settings.langfuseHost } : {}),
+      ...(settings.langfusePrivacy !== null ? { privacy: settings.langfusePrivacy } : {}),
+      ...(settings.langfuseSampleRate !== null
+        ? { sample_rate: settings.langfuseSampleRate }
+        : {}),
+    };
+  }
+
   config.inactivity_exit_sec = inactivitySeconds;
   return config;
 }
@@ -123,6 +141,8 @@ export interface PublishRecordsInput {
   extensions?: string[];
   /** Raw auth.json bytes from the owner-side store. */
   providerAuthJson: string;
+  /** Langfuse API keys from the profile; absent = leave any existing head alone. */
+  langfuseKeys?: LangfuseCredentials | null;
 }
 
 /**
@@ -159,6 +179,20 @@ export async function publishDeployRecords(input: PublishRecordsInput): Promise<
       slug: AUTH_SLUG,
       value: authValue,
     });
+
+    // Langfuse keys are published only when the profile has them locally.
+    // Absence is *not* a revocation: the head may have been written by
+    // `autogent-nostr langfuse set` on another machine, and a deploy must never
+    // tombstone a credential it simply does not know about.
+    if (input.langfuseKeys) {
+      await records.publish(LANGFUSE_SLUG, {
+        slug: LANGFUSE_SLUG,
+        value: {
+          public_key: input.langfuseKeys.publicKey,
+          secret_key: input.langfuseKeys.secretKey,
+        },
+      });
+    }
   } catch (error) {
     fail(
       `failed to publish deploy records to ${payload.relayUrl}: ` +

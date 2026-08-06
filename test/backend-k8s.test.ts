@@ -216,6 +216,35 @@ describe("core-record derivation from the profile", () => {
     expect(core.system_prompt).toBeUndefined();
   });
 
+  it("emits the langfuse block only when the profile enabled tracing", () => {
+    const full = buildCoreConfig(
+      settings({
+        langfuseEnabled: true,
+        langfuseHost: "https://langfuse.internal",
+        langfusePrivacy: "full",
+        langfuseSampleRate: 0.5,
+      }),
+      0,
+    );
+    expect(full.langfuse).toEqual({
+      enabled: true,
+      host: "https://langfuse.internal",
+      privacy: "full",
+      sample_rate: 0.5,
+    });
+
+    // Unset fields are omitted, not defaulted here: the runtime owns defaults.
+    const partial = buildCoreConfig(settings({ langfuseEnabled: true }), 0);
+    expect(partial.langfuse).toEqual({ enabled: true });
+
+    // Disabled emits nothing at all — absence already means "off".
+    const off = buildCoreConfig(
+      settings({ langfuseHost: "https://langfuse.internal", langfusePrivacy: "full" }),
+      0,
+    );
+    expect(off.langfuse).toBeUndefined();
+  });
+
   it("takes extensions from the profile", () => {
     const fromProfile = buildCoreConfig(settings(), 0, ["npm:@wierdbytes/pi-anthropic"]);
     expect(fromProfile.extensions).toEqual(["npm:@wierdbytes/pi-anthropic"]);
