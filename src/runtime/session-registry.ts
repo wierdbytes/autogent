@@ -1,25 +1,46 @@
 /**
- * One persistent Pi session per channel (plan §7.1).
+ * One in-memory Pi session per conversation (plan §7.1).
  *
- * A channel keeps its context across turns, which is what makes the agent feel
- * continuous in a conversation. Thread isolation is *not* done here — it is the
- * scheduler's job: only the active thread may steer a running turn, other
- * threads wait. Splitting it that way keeps a noisy channel from fragmenting
- * into dozens of contextless sessions.
+ * A conversation is either a whole channel (top-level messages, DMs) or a
+ * single thread (`channelId::threadRootId`). Sessions are always created
+ * empty in this process — on-disk transcripts from previous runs are never
+ * reopened. Continuity comes from seeding instead: when a session is created,
+ * the caller supplies the conversation's prior messages and they are appended
+ * to the fresh transcript as real `user`/`assistant` turns before the first
+ * prompt.
  *
- * This module is the only place that touches the Pi SDK, so everything else can
- * be tested against {@link AgentSessionHandle}.
+ * Thread isolation is *not* done here — it is the scheduler's job: only the
+ * active conversation may steer a running turn, other conversations wait.
+ *
+ * This module is the only place that touches the Pi SDK, so everything else
+ * can be tested against {@link AgentSessionHandle}.
  */
 
 import type { PiConfig } from "../config.js";
+import { systemPromptShaperExtension } from "../prompts/system-prompt-shaper.js";
 import type {
+  AcquireSessionOptions,
   AgentSessionHandle,
   ChannelRepository,
   Logger,
   PiEvent,
   SessionRegistryPort,
+  SessionSeedMessage,
 } from "./ports.js";
 import { PiEventRouter } from "./pi-event-router.js";
+
+/** Separator between channel id and thread root in a session key. */
+export const SESSION_KEY_SEPARATOR = "::";
+
+/** Builds the registry key for a conversation. */
+export function sessionKeyFor(channelId: string, threadRootId: string | null): string {
+  return threadRootId ? `${channelId}${SESSION_KEY_SEPARATOR}${threadRootId}` : channelId;
+}
+
+function channelIdOfKey(sessionKey: string): string {
+  const separator = sessionKey.indexOf(SESSION_KEY_SEPARATOR);
+  return separator === -1 ? sessionKey : sessionKey.slice(0, separator);
+}
 
 /** Structural subset of the SDK's `AgentSession`, to avoid a hard type import. */
 interface SdkSession {
@@ -36,7 +57,20 @@ interface SdkSession {
   waitForIdle(): Promise<void>;
   subscribe(listener: (event: unknown) => void): () => void;
   setModel(model: unknown): Promise<void>;
+  /**
+   * Appends a custom (user-role) message without necessarily starting a turn.
+   * Present in the real SDK; optional so fakes stay minimal.
+   */
+  sendCustomMessage?(
+    message: { customType: string; content: string; display: boolean },
+    options?: { triggerTurn?: boolean },
+  ): Promise<void>;
   dispose(): void;
+}
+
+/** The slice of the SDK's `SessionManager` instance used for seeding. */
+interface SdkSessionManager {
+  appendMessage(message: Record<string, unknown>): string;
 }
 
 interface SdkModule {
@@ -56,6 +90,40 @@ interface SdkModule {
   };
 }
 
+/** Zero-filled usage block for synthetic seeded assistant messages. */
+const SEED_USAGE = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
+/** A seeded message as the SDK transcript stores it. */
+function seedEntryOf(message: SessionSeedMessage): Record<string, unknown> {
+  if (message.role === "user") {
+    return {
+      role: "user",
+      content: [{ type: "text", text: message.content }],
+      timestamp: message.timestampMs,
+    };
+  }
+  // Assistant entries need provider metadata structurally; the placeholders
+  // are never sent back to a provider — only the text content participates in
+  // the LLM context.
+  return {
+    role: "assistant",
+    content: [{ type: "text", text: message.content }],
+    api: "seed",
+    provider: "seed",
+    model: "seed",
+    usage: SEED_USAGE,
+    stopReason: "stop",
+    timestamp: message.timestampMs,
+  };
+}
+
 /**
  * Adapts an SDK session to {@link AgentSessionHandle}.
  *
@@ -64,15 +132,15 @@ interface SdkModule {
 class PiSessionAdapter implements AgentSessionHandle {
   readonly #router = new PiEventRouter();
   #disposed = false;
-  readonly #resumed: boolean;
+  readonly #seeded: boolean;
   #prompted = false;
 
   constructor(
     private readonly session: SdkSession,
     private readonly resolveModel: (id: string) => Promise<unknown>,
-    options: { resumed: boolean },
+    options: { seeded: boolean },
   ) {
-    this.#resumed = options.resumed;
+    this.#seeded = options.seeded;
   }
 
   get sessionId(): string {
@@ -103,13 +171,9 @@ class PiSessionAdapter implements AgentSessionHandle {
       : undefined;
   }
 
-  /**
-   * A resumed transcript has memory from the start; a fresh one only after its
-   * first prompt. Steering is not tracked separately because it can only
-   * happen mid-turn — i.e. after a prompt already flipped the flag.
-   */
+  /** Seeded transcripts have memory from the start; empty ones after a prompt. */
   get hasHistory(): boolean {
-    return this.#resumed || this.#prompted;
+    return this.#seeded || this.#prompted;
   }
 
   prompt(text: string): Promise<void> {
@@ -120,6 +184,15 @@ class PiSessionAdapter implements AgentSessionHandle {
   }
   steer(text: string): Promise<void> {
     return this.session.steer(text);
+  }
+  async injectContext(text: string): Promise<void> {
+    if (!this.session.sendCustomMessage) {
+      throw new Error("session does not support context injection");
+    }
+    await this.session.sendCustomMessage(
+      { customType: "buzz-context", content: text, display: false },
+      { triggerTurn: false },
+    );
   }
   abort(): Promise<void> {
     return this.session.abort();
@@ -184,45 +257,43 @@ export class SessionRegistry implements SessionRegistryPort {
   /**
    * Applies a core-record config change (remote plan §3.3).
    *
-   * New sessions pick the new parameters up immediately; live channel sessions
-   * are recreated lazily — dropped from memory here, reopened from their
-   * on-disk transcript on the channel's next turn — so a config push never
-   * aborts a running turn.
+   * New sessions pick the new parameters up immediately; live sessions are
+   * dropped from memory here and rebuilt (reseeded from the relay) on the
+   * conversation's next turn — so a config push never aborts a running turn.
    */
   async applyConfig(update: Partial<PiConfig>): Promise<void> {
     this.#config = { ...this.#config, ...update };
-    for (const [channelId, session] of [...this.#sessions.entries()]) {
-      if (session.isStreaming) continue; // picked up on rotation/next acquire after release
-      this.#sessions.delete(channelId);
+    for (const [sessionKey, session] of [...this.#sessions.entries()]) {
+      if (session.isStreaming) continue; // picked up on the next acquire after release
+      this.#sessions.delete(sessionKey);
       session.dispose();
     }
   }
 
-  async acquire(channelId: string): Promise<AgentSessionHandle> {
-    const existing = this.#sessions.get(channelId);
+  async acquire(sessionKey: string, options?: AcquireSessionOptions): Promise<AgentSessionHandle> {
+    const existing = this.#sessions.get(sessionKey);
     if (existing) return existing;
-    const handle = await this.#open(channelId, { fresh: false });
-    this.#sessions.set(channelId, handle);
+    const handle = await this.#open(sessionKey, options);
+    this.#sessions.set(sessionKey, handle);
     return handle;
   }
 
-  async release(channelId: string): Promise<void> {
-    const session = this.#sessions.get(channelId);
+  async release(sessionKey: string): Promise<void> {
+    const session = this.#sessions.get(sessionKey);
     if (!session) return;
-    this.#sessions.delete(channelId);
+    this.#sessions.delete(sessionKey);
     session.dispose();
   }
 
-  async rotate(channelId: string): Promise<AgentSessionHandle> {
-    await this.release(channelId);
-    const handle = await this.#open(channelId, { fresh: true });
-    this.#sessions.set(channelId, handle);
-    return handle;
+  async releaseForChannel(channelId: string): Promise<void> {
+    for (const sessionKey of [...this.#sessions.keys()]) {
+      if (channelIdOfKey(sessionKey) === channelId) await this.release(sessionKey);
+    }
   }
 
   async disposeAll(): Promise<void> {
-    for (const channelId of [...this.#sessions.keys()]) {
-      await this.release(channelId);
+    for (const sessionKey of [...this.#sessions.keys()]) {
+      await this.release(sessionKey);
     }
   }
 
@@ -232,43 +303,51 @@ export class SessionRegistry implements SessionRegistryPort {
   }
 
   /**
-   * Opens the channel's session, reusing the transcript on disk when we have one.
+   * Opens a fresh session for the conversation.
    *
-   * Reusing the recorded path (rather than "most recent session for this cwd")
-   * matters because several channels share one cwd; "most recent" would hand a
-   * channel someone else's conversation.
+   * Prior-run transcripts on disk are deliberately not reopened: the seed
+   * callback rebuilds the conversation from the relay, which is the durable
+   * source of truth for what was actually said.
    */
-  async #open(channelId: string, options: { fresh: boolean }): Promise<AgentSessionHandle> {
+  async #open(sessionKey: string, options?: AcquireSessionOptions): Promise<AgentSessionHandle> {
     const sdk = await this.#sdkModule();
     const config = this.#config;
-    const record = this.deps.channels.get(this.deps.relayId, channelId);
-    const priorPath = options.fresh ? null : record?.piSessionPath;
-    const reused = Boolean(priorPath);
 
-    const sessionManager = priorPath
-      ? sdk.SessionManager.open(priorPath)
-      : sdk.SessionManager.create(config.cwd);
+    const sessionManager = sdk.SessionManager.create(config.cwd);
+
+    // Seed the transcript before the SDK session exists, so the agent loads
+    // the conversation as ordinary context on its first turn.
+    const seedMessages = options?.seed ? await options.seed() : [];
+    if (seedMessages.length > 0) {
+      const manager = sessionManager as SdkSessionManager;
+      for (const message of seedMessages) manager.appendMessage(seedEntryOf(message));
+    }
 
     const model = config.model ? await this.#resolveModel(config.model) : undefined;
 
-    // Extra system prompts and extension sources travel through a resource
-    // loader; createAgentSession has no direct option for either. The builtin
-    // prelude (buzz CLI usage) goes ahead of the owner's appendSystemPrompt so
-    // the owner's instructions read as the more specific, later word.
-    // Extension sources may be `npm:`/`git:` specifiers — the loader's package
-    // manager resolves (and installs) them.
+    // Extra system prompts, the prompt shaper and extension sources travel
+    // through a resource loader; createAgentSession has no direct option for
+    // any of them. The builtin prelude (buzz CLI usage) goes ahead of the
+    // owner's appendSystemPrompt so the owner's instructions read as the more
+    // specific, later word. Extension sources may be `npm:`/`git:` specifiers
+    // — the loader's package manager resolves (and installs) them.
     let resourceLoader: InstanceType<NonNullable<SdkModule["DefaultResourceLoader"]>> | undefined;
     const extensions = config.extensions ?? [];
     const appendPrompts = [
       ...(this.deps.systemPromptPrelude?.() ?? []),
       ...(config.appendSystemPrompt ? [config.appendSystemPrompt] : []),
     ];
-    if ((appendPrompts.length > 0 || extensions.length > 0) && sdk.DefaultResourceLoader) {
+    const contextLines = options?.contextLines ?? [];
+    if (sdk.DefaultResourceLoader) {
       resourceLoader = new sdk.DefaultResourceLoader({
         cwd: config.cwd,
         agentDir: config.agentDir,
         ...(appendPrompts.length > 0 ? { appendSystemPrompt: appendPrompts } : {}),
         ...(extensions.length > 0 ? { additionalExtensionPaths: extensions } : {}),
+        // Reshapes the assembled system prompt per turn: drops the SDK's
+        // Guidelines / Pi documentation sections and inserts the conversation
+        // context below `Current working directory`.
+        extensionFactories: [systemPromptShaperExtension(contextLines)],
       });
       await resourceLoader.reload();
     }
@@ -312,19 +391,22 @@ export class SessionRegistry implements SessionRegistryPort {
         : {}),
     });
 
+    // Recorded for observability only — the path is never reopened.
     this.deps.channels.setPiSession(
       this.deps.relayId,
-      channelId,
+      channelIdOfKey(sessionKey),
       session.sessionId,
       session.sessionFile ?? null,
     );
     this.deps.logger.info("pi session ready", {
-      channelId,
+      sessionKey,
       sessionId: session.sessionId,
-      reused,
+      seeded: seedMessages.length,
     });
 
-    return new PiSessionAdapter(session, (id) => this.#resolveModel(id), { resumed: reused });
+    return new PiSessionAdapter(session, (id) => this.#resolveModel(id), {
+      seeded: seedMessages.length > 0,
+    });
   }
 
   /** Accepts `provider/model` and bare model ids. */

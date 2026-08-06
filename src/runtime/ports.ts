@@ -377,14 +377,19 @@ export interface AgentSessionHandle {
   /** Context window of the active model, in tokens, when the SDK reports it. */
   readonly contextWindow: number | undefined;
   /**
-   * True when the session already holds conversation memory: it was resumed
-   * from an on-disk transcript, or it has been prompted at least once in this
-   * process. Context fetching keys off this to avoid re-injecting messages the
-   * session already carries (its own replies, previously delivered triggers).
+   * True when the session already holds conversation memory: it was seeded
+   * with prior messages at creation, or it has been prompted at least once in
+   * this process.
    */
   readonly hasHistory: boolean;
   prompt(text: string): Promise<void>;
   steer(text: string): Promise<void>;
+  /**
+   * Appends a user-role context message to an idle session without starting a
+   * turn. Used to fold messages that arrived between turns into the transcript
+   * before the next prompt.
+   */
+  injectContext(text: string): Promise<void>;
   abort(): Promise<void>;
   waitForIdle(): Promise<void>;
   subscribe(listener: (event: PiEvent) => void): () => void;
@@ -425,9 +430,36 @@ export interface PiUsage {
   costUsd: number | null;
 }
 
+/** One prior message used to seed a fresh session transcript. */
+export interface SessionSeedMessage {
+  /** Other participants become `user` turns; the agent's own become `assistant`. */
+  role: "user" | "assistant";
+  content: string;
+  /** Unix milliseconds for the transcript entry. */
+  timestampMs: number;
+}
+
+export interface AcquireSessionOptions {
+  /**
+   * Invoked only when a session is actually created (never for a cached one);
+   * returns the turns seeding the fresh transcript, oldest first.
+   */
+  seed?: () => Promise<SessionSeedMessage[]>;
+  /**
+   * Static context lines placed in the system prompt directly below
+   * `Current working directory` (channel, scope, self username, …).
+   */
+  contextLines?: readonly string[];
+}
+
 export interface SessionRegistryPort {
-  /** Opens or creates the persistent Pi session for a channel. */
-  acquire(channelId: string): Promise<AgentSessionHandle>;
+  /**
+   * Opens or creates the Pi session for a conversation. `sessionKey` is the
+   * channel id for channel-level conversations, or `channelId::threadRootId`
+   * for thread-bound ones. Sessions always start empty in this process —
+   * on-disk transcripts from previous runs are never reopened.
+   */
+  acquire(sessionKey: string, options?: AcquireSessionOptions): Promise<AgentSessionHandle>;
   /**
    * Applies a config change to future sessions (core-record hot update).
    * Optional: test fakes and registries without live reconfig may omit it.
@@ -440,9 +472,9 @@ export interface SessionRegistryPort {
     excludeTools?: string[];
     extensions?: string[];
   }): Promise<void>;
-  /** Drops the in-memory session; the transcript on disk survives. */
-  release(channelId: string): Promise<void>;
-  /** Starts a fresh session for the channel, discarding prior context. */
-  rotate(channelId: string): Promise<AgentSessionHandle>;
+  /** Drops one in-memory session. */
+  release(sessionKey: string): Promise<void>;
+  /** Drops every in-memory session belonging to a channel. */
+  releaseForChannel(channelId: string): Promise<void>;
   disposeAll(): Promise<void>;
 }

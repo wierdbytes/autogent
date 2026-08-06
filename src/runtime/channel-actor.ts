@@ -13,11 +13,13 @@
 
 import type { NostrEvent } from "../nostr/types.js";
 import type {
+  AcquireSessionOptions,
   AgentSessionHandle,
   Clock,
   Logger,
   PiEvent,
   PiUsage,
+  SessionSeedMessage,
   StatePort,
   TelemetryPort,
   TracingPort,
@@ -29,8 +31,14 @@ import {
   usageUpdateFrame,
   type TelemetryFrameBody,
 } from "../telemetry/buzz-desktop-compat.js";
-import type { ChannelType, ConversationContext, PromptChannelInfo } from "./prompt-formatter.js";
-import { formatPrimaryPrompt, formatSteeringPrompt } from "./prompt-formatter.js";
+import type { ChannelType, PromptChannelInfo } from "./prompt-formatter.js";
+import {
+  formatEventBlock,
+  formatPrimaryPrompt,
+  formatSteeringPrompt,
+  formatSystemPromptContext,
+} from "./prompt-formatter.js";
+import type { FetchHistoryOptions, HistoryMessage } from "./history-fetcher.js";
 import { canonicalThreadRoot, conversationKey, type ConversationKey } from "./conversation-key.js";
 import { createTurnContext, withSteeringInput, type TurnContext } from "./turn-context.js";
 import type { Semaphore } from "./scheduler.js";
@@ -55,20 +63,30 @@ export interface ChannelActorDeps {
   output: OutputRouter;
   clock: Clock;
   logger: Logger;
-  /** Opens (or reuses) the Pi session backing this channel. */
-  acquireSession(): Promise<AgentSessionHandle>;
-  /** Starts a fresh Pi session, discarding prior context. */
-  rotateSession(): Promise<AgentSessionHandle>;
   /**
-   * Prior messages to include as context. `sessionHasHistory` lets the fetcher
-   * skip content the session already carries (its own replies, delivered
-   * triggers) instead of re-injecting it every turn.
+   * Opens (or reuses) the Pi session for a conversation of this channel.
+   * `threadRootId` is null for the channel-level conversation.
    */
-  fetchContext(
+  acquireSession(
+    threadRootId: string | null,
+    options: AcquireSessionOptions,
+  ): Promise<AgentSessionHandle>;
+  /** Drops every cached session of this channel (owner `!rotate`). */
+  releaseChannelSessions(): Promise<void>;
+  /**
+   * Prior conversation messages. `seed` mode returns everything relevant for
+   * a brand-new session; `delta` mode returns only messages the session has
+   * not seen yet (used to top up a continuing session between turns).
+   */
+  fetchHistory(
     event: NostrEvent,
     threadRootId: string,
-    opts: { sessionHasHistory: boolean },
-  ): Promise<ConversationContext | null>;
+    opts: FetchHistoryOptions,
+  ): Promise<HistoryMessage[]>;
+  /** Display name off the author's kind 0 profile, or null. */
+  resolveAuthorLabel(pubkey: string): Promise<string | null>;
+  /** The agent's own profile name, surfaced as `Self username`. */
+  selfName: string;
   /** Reports provider usage as Pi completes each model call. */
   observeUsage(sessionId: string, turnId: string, usage: PiUsage): void;
   /** Emits the NIP-AM metric for a finished turn. */
@@ -108,6 +126,14 @@ export class ChannelActor {
   #pumping = false;
   #turn: ActiveTurn | null = null;
   #session: AgentSessionHandle | null = null;
+  /** Conversation of the cached session: thread root, or null for channel level. */
+  #sessionThreadRootId: string | null = null;
+  /**
+   * Highest event `created_at` (unix seconds) each conversation's session has
+   * absorbed — via seeding, delta injection, prompts or steers. The next delta
+   * fetch starts strictly after it, so nothing enters a session twice.
+   */
+  readonly #watermarks = new Map<string, number>();
   #unsubscribe: (() => void) | null = null;
   /** Events waiting for the current turn to finish, oldest first. */
   #queue: AcceptedEvent[] = [];
@@ -265,17 +291,62 @@ export class ChannelActor {
     // session idle while it waits for a slot.
     const releaseConcurrency = (await this.deps.concurrency?.acquire()) ?? (() => {});
 
-    const session = await this.#ensureSession();
-    // Read before `session.prompt()` below: prompting flips `hasHistory` on a
-    // fresh session, and this turn must still see the pre-prompt state.
-    const context_ = await this.deps
-      .fetchContext(event, threadRootId, { sessionHasHistory: session.hasHistory })
-      .catch(() => null);
+    // A thread gets its own session; top-level messages share the channel's.
+    const sessionThreadRootId = threadRootId === event.id ? null : threadRootId;
+    const watermarkKey = sessionThreadRootId ?? "";
+
+    // The seed callback runs only when the registry actually creates a new
+    // session; `seeded` doubles as the signal that it did.
+    let seeded: HistoryMessage[] | null = null;
+    const session = await this.#ensureSession(sessionThreadRootId, {
+      contextLines: formatSystemPromptContext({
+        channel: this.#channelInfo(),
+        threadRootId: sessionThreadRootId,
+        selfName: this.deps.selfName,
+      }),
+      seed: async () => {
+        const history = await this.deps
+          .fetchHistory(event, threadRootId, { mode: "seed" })
+          .catch(() => [] as HistoryMessage[]);
+        seeded = history;
+        return this.#seedMessagesOf(history);
+      },
+    });
+
+    if (seeded === null) {
+      // Continuing session: fold in messages that arrived between turns as
+      // separate user-role entries, ahead of the trigger prompt.
+      const delta = await this.deps
+        .fetchHistory(event, threadRootId, {
+          mode: "delta",
+          ...(this.#watermarks.has(watermarkKey)
+            ? { sinceExclusive: this.#watermarks.get(watermarkKey) as number }
+            : {}),
+        })
+        .catch(() => [] as HistoryMessage[]);
+      for (const message of delta) {
+        try {
+          await session.injectContext(await this.#historyBlock(message));
+          this.#noteWatermark(watermarkKey, message.createdAt);
+        } catch (error) {
+          this.deps.logger.warn("context injection failed", {
+            eventId: message.eventId,
+            error,
+          });
+        }
+      }
+    } else {
+      for (const message of seeded as HistoryMessage[]) {
+        this.#noteWatermark(watermarkKey, message.createdAt);
+      }
+    }
+    this.#noteWatermark(watermarkKey, event.created_at);
+
     const prompt = formatPrimaryPrompt({
-      event,
-      channel: this.#channelInfo(),
-      context: context_,
-      promptTag: accepted.promptTag,
+      authorLabel: await this.deps.resolveAuthorLabel(event.pubkey).catch(() => null),
+      authorPubkey: event.pubkey,
+      createdAt: event.created_at,
+      content: event.content,
     });
 
     this.#turn = {
@@ -370,9 +441,10 @@ export class ChannelActor {
     });
 
     const prompt = formatSteeringPrompt({
-      event,
-      channel: this.#channelInfo(),
-      promptTag: accepted.promptTag,
+      authorLabel: await this.deps.resolveAuthorLabel(event.pubkey).catch(() => null),
+      authorPubkey: event.pubkey,
+      createdAt: event.created_at,
+      content: event.content,
     });
 
     try {
@@ -393,6 +465,7 @@ export class ChannelActor {
       createdAt: event.created_at,
     });
     turn.lastActivityMs = this.deps.clock.now();
+    this.#noteWatermark(this.#sessionThreadRootId ?? "", event.created_at);
 
     this.deps.state.inbox.setDisposition(event.id, "steer_delivered");
     this.deps.state.turns.markInputDelivered(turn.context.turnId, event.id, this.deps.clock.now());
@@ -548,15 +621,12 @@ export class ChannelActor {
     await this.#onCancel("rotated");
     this.#unsubscribe?.();
     this.#unsubscribe = null;
-    this.#session = await this.deps.rotateSession();
-    this.#subscribeToSession(this.#session);
-    this.deps.telemetry.emit({
-      kind: "session_resolved",
-      channelId: this.deps.channelId,
-      sessionId: this.#session.sessionId,
-      turnId: null,
-      payload: { isNewSession: true },
-    });
+    this.#session = null;
+    this.#sessionThreadRootId = null;
+    this.#watermarks.clear();
+    // Sessions are dropped, not rebuilt: the next trigger reseeds the
+    // conversation from the relay into a fresh transcript.
+    await this.deps.releaseChannelSessions();
   }
 
   async #onClose(): Promise<void> {
@@ -570,18 +640,25 @@ export class ChannelActor {
   /* Session plumbing                                                    */
   /* ------------------------------------------------------------------ */
 
-  async #ensureSession(): Promise<AgentSessionHandle> {
-    if (this.#session && this.#session.disposed) {
-      // A config push disposed the cached session out from under the actor;
-      // prompting into it would hang the turn forever. Drop the stale handle
-      // and re-acquire.
+  async #ensureSession(
+    threadRootId: string | null,
+    options: AcquireSessionOptions,
+  ): Promise<AgentSessionHandle> {
+    if (
+      this.#session &&
+      (this.#session.disposed || this.#sessionThreadRootId !== threadRootId)
+    ) {
+      // Either a config push disposed the cached session out from under the
+      // actor, or this turn belongs to a different conversation. Drop the
+      // handle (the registry still owns live sessions) and re-acquire.
       this.#unsubscribe?.();
       this.#unsubscribe = null;
       this.#session = null;
     }
     if (this.#session) return this.#session;
-    const session = await this.deps.acquireSession();
+    const session = await this.deps.acquireSession(threadRootId, options);
     this.#session = session;
+    this.#sessionThreadRootId = threadRootId;
     this.#subscribeToSession(session);
     this.deps.telemetry.emit({
       kind: "session_resolved",
@@ -601,6 +678,41 @@ export class ChannelActor {
     this.#unsubscribe = session.subscribe((event) => {
       this.#post({ kind: "pi", event });
     });
+  }
+
+  /** Prior messages as seed turns: others become `user`, the agent `assistant`. */
+  async #seedMessagesOf(history: HistoryMessage[]): Promise<SessionSeedMessage[]> {
+    const messages: SessionSeedMessage[] = [];
+    for (const message of history) {
+      messages.push(
+        message.fromAgent
+          ? {
+              role: "assistant",
+              content: message.content,
+              timestampMs: message.createdAt * 1000,
+            }
+          : {
+              role: "user",
+              content: await this.#historyBlock(message),
+              timestampMs: message.createdAt * 1000,
+            },
+      );
+    }
+    return messages;
+  }
+
+  async #historyBlock(message: HistoryMessage): Promise<string> {
+    return formatEventBlock({
+      authorLabel: await this.deps.resolveAuthorLabel(message.authorPubkey).catch(() => null),
+      authorPubkey: message.authorPubkey,
+      createdAt: message.createdAt,
+      content: message.content,
+    });
+  }
+
+  #noteWatermark(key: string, createdAt: number): void {
+    const current = this.#watermarks.get(key) ?? 0;
+    if (createdAt > current) this.#watermarks.set(key, createdAt);
   }
 
   #channelInfo(): PromptChannelInfo {

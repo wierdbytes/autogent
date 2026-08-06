@@ -3,13 +3,14 @@
  *
  * Membership can change under us at any time. When the agent is removed from a
  * channel it must stop immediately and completely: no new events accepted, the
- * running turn cancelled, queued work dropped. The Pi session is left on disk —
- * being removed from a channel is not a reason to destroy its history, and
- * re-adding should feel continuous.
+ * running turn cancelled, queued work dropped, its in-memory sessions
+ * released. Re-adding feels continuous anyway: the next trigger reseeds the
+ * conversation from the relay, which is the durable record of what was said.
  */
 
-import type { ConversationContext } from "./prompt-formatter.js";
 import type { NostrEvent } from "../nostr/types.js";
+import type { FetchHistoryOptions, HistoryMessage } from "./history-fetcher.js";
+import { sessionKeyFor } from "./session-registry.js";
 import { ChannelActor, type AcceptedEvent, type ChannelActorDeps } from "./channel-actor.js";
 import type { ChannelType } from "./prompt-formatter.js";
 import type { TurnContext } from "./turn-context.js";
@@ -22,6 +23,7 @@ import type {
   TelemetryPort,
   TracingPort,
 } from "./ports.js";
+import type { AcquireSessionOptions } from "./ports.js";
 import type { OutputRouter } from "./output-router.js";
 import type { Semaphore } from "./scheduler.js";
 
@@ -41,11 +43,15 @@ export interface ChannelRegistryDeps {
   sessions: SessionRegistryPort;
   clock: Clock;
   logger: Logger;
-  fetchContext(
+  fetchHistory(
     event: NostrEvent,
     threadRootId: string,
-    opts: { sessionHasHistory: boolean },
-  ): Promise<ConversationContext | null>;
+    opts: FetchHistoryOptions,
+  ): Promise<HistoryMessage[]>;
+  /** Display name off a kind 0 profile, or null when unknown. */
+  resolveAuthorLabel(pubkey: string): Promise<string | null>;
+  /** The agent's own profile name, surfaced to the model as its username. */
+  selfName: string;
   observeUsage(sessionId: string, turnId: string, usage: PiUsage): void;
   publishUsage(turn: TurnContext, sessionId: string | null, stopReason: string): void;
   newTurnId(): string;
@@ -110,10 +116,13 @@ export class ChannelRegistry {
       output: this.deps.output,
       clock: this.deps.clock,
       logger: this.deps.logger.child({ channelId: descriptor.channelId }),
-      acquireSession: () => this.deps.sessions.acquire(descriptor.channelId),
-      rotateSession: () => this.deps.sessions.rotate(descriptor.channelId),
-      fetchContext: (event, threadRootId, opts) =>
-        this.deps.fetchContext(event, threadRootId, opts),
+      acquireSession: (threadRootId: string | null, options: AcquireSessionOptions) =>
+        this.deps.sessions.acquire(sessionKeyFor(descriptor.channelId, threadRootId), options),
+      releaseChannelSessions: () => this.deps.sessions.releaseForChannel(descriptor.channelId),
+      fetchHistory: (event, threadRootId, opts) =>
+        this.deps.fetchHistory(event, threadRootId, opts),
+      resolveAuthorLabel: (pubkey) => this.deps.resolveAuthorLabel(pubkey),
+      selfName: this.deps.selfName,
       observeUsage: (sessionId, turnId, usage) => this.deps.observeUsage(sessionId, turnId, usage),
       publishUsage: (turn, sessionId, stopReason) =>
         this.deps.publishUsage(turn, sessionId, stopReason),
@@ -144,7 +153,7 @@ export class ChannelRegistry {
     this.#descriptors.delete(channelId);
 
     await actor.close();
-    await this.deps.sessions.release(channelId);
+    await this.deps.sessions.releaseForChannel(channelId);
     this.deps.state.channels.setStatus(this.deps.relayId, channelId, "removed");
     this.deps.logger.info("channel deactivated", { channelId });
   }

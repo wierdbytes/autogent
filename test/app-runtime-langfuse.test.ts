@@ -112,7 +112,7 @@ async function bootRemote(options: {
     sessions: {
       acquire: async () => session,
       release: async () => {},
-      rotate: async () => session,
+      releaseForChannel: async () => {},
       disposeAll: async () => {},
     },
     remote: {

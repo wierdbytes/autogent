@@ -53,7 +53,8 @@ import { UsagePublisher } from "../telemetry/usage-publisher.js";
 import { UsageTracker } from "../telemetry/usage-tracker.js";
 import { parseControlFrame } from "../telemetry/observer-envelope.js";
 import { ChannelRegistry } from "./channel-registry.js";
-import { ContextFetcher } from "./context-fetcher.js";
+import { HistoryFetcher } from "./history-fetcher.js";
+import { ProfileNameResolver } from "./profile-names.js";
 import { InactivityMonitor } from "./inactivity.js";
 import { systemClock } from "./clock.js";
 import { canonicalThreadRoot } from "./conversation-key.js";
@@ -191,7 +192,8 @@ export class AppRuntime {
   readonly #profiles: ProfileReconciler;
   readonly #presence: PresencePublisher;
   readonly #gate: AuthorGate;
-  readonly #context: ContextFetcher;
+  readonly #history: HistoryFetcher;
+  readonly #profileNames: ProfileNameResolver;
   readonly #concurrency: Semaphore;
   readonly #remote: RemoteRuntimeOptions | null;
   /** Heads the agent still lacks; non-empty means degraded (prompts refused). */
@@ -334,12 +336,18 @@ export class AppRuntime {
         systemPromptPrelude: () => (this.#config.buzzCli.enabled ? [BUZZ_CLI_PROMPT] : []),
       });
 
-    this.#context = new ContextFetcher({
+    this.#history = new HistoryFetcher({
       relay: this.#relay,
-      logger: this.#logger.child({ component: "context" }),
+      logger: this.#logger.child({ component: "history" }),
       limit: this.#config.scheduler.contextMessageLimit,
       agentPubkey: this.#signer.publicKey,
-      deliveredDispositionOf: (eventId) => this.#state.inbox.get(eventId)?.disposition ?? null,
+      dispositionOf: (eventId) => this.#state.inbox.get(eventId)?.disposition ?? null,
+    });
+
+    this.#profileNames = new ProfileNameResolver({
+      relay: this.#relay,
+      logger: this.#logger.child({ component: "profiles" }),
+      now: () => this.#clock.now(),
     });
 
     const output = new OutputRouter({
@@ -362,7 +370,9 @@ export class AppRuntime {
       sessions: this.#sessions,
       clock: this.#clock,
       logger: this.#logger.child({ component: "channel" }),
-      fetchContext: (event, threadRootId, opts) => this.#context.fetch(event, threadRootId, opts),
+      fetchHistory: (event, threadRootId, opts) => this.#history.fetch(event, threadRootId, opts),
+      resolveAuthorLabel: (pubkey) => this.#profileNames.resolve(pubkey),
+      selfName: this.#config.profile.name,
       observeUsage: (sessionId, turnId, usage) =>
         this.#usageTracker.observe(sessionId, turnId, usage),
       publishUsage: (turn, sessionId, stopReason) =>
@@ -869,7 +879,7 @@ export class AppRuntime {
       allowlist: next.security.allowlist,
     });
     this.#concurrency.setPermits(next.scheduler.maxConcurrentTurns);
-    this.#context.setLimit(next.scheduler.contextMessageLimit);
+    this.#history.setLimit(next.scheduler.contextMessageLimit);
     await this.#sessions.applyConfig?.({
       model: next.pi.model,
       thinkingLevel: next.pi.thinkingLevel,

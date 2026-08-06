@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { npubEncode } from "nostr-tools/nip19";
 import { ChannelActor, type ChannelActorDeps } from "../src/runtime/channel-actor.js";
+import type { HistoryMessage } from "../src/runtime/history-fetcher.js";
 import { OutputRouter } from "../src/runtime/output-router.js";
 import { FakeClock } from "../src/runtime/clock.js";
 import { nullLogger } from "../src/runtime/logger.js";
@@ -27,6 +29,12 @@ function setup(
     session?: FakeSession;
     acquireSequence?: FakeSession[];
     tracing?: RecordingTracingPort;
+    /** Returned by fetchHistory in seed mode. */
+    seedHistory?: HistoryMessage[];
+    /** Returned by fetchHistory in delta mode. */
+    deltaHistory?: HistoryMessage[];
+    /** Display names by pubkey; unresolved authors fall back to npub. */
+    labels?: Record<string, string>;
   } = {},
 ) {
   const clock = new FakeClock();
@@ -38,7 +46,11 @@ function setup(
   let acquireCalls = 0;
   const usage: Array<{ turnId: string; stopReason: string }> = [];
   const observed: Array<{ sessionId: string; turnId: string }> = [];
-  const contextCalls: Array<{ eventId: string; sessionHasHistory: boolean }> = [];
+  const historyCalls: Array<{ eventId: string; mode: string; sinceExclusive?: number }> = [];
+  const seedCalls: Array<{ threadRootId: string | null; contextLines: readonly string[] }> = [];
+  /** Sessions the fake registry already "created" — seed runs once per session. */
+  const handedOut = new Set<FakeSession>();
+  let releasedChannelSessions = 0;
   let turnSeq = 0;
 
   const output = new OutputRouter({
@@ -60,15 +72,33 @@ function setup(
     output,
     clock,
     logger: nullLogger,
-    acquireSession: async () =>
-      options.acquireSequence
+    acquireSession: async (threadRootId, acquireOptions) => {
+      const next = options.acquireSequence
         ? (options.acquireSequence[Math.min(acquireCalls++, options.acquireSequence.length - 1)] ?? session)
-        : session,
-    rotateSession: async () => session,
-    fetchContext: async (event, _threadRootId, opts) => {
-      contextCalls.push({ eventId: event.id, sessionHasHistory: opts.sessionHasHistory });
-      return null;
+        : session;
+      // Mirrors the real registry: the seed callback runs only when a session
+      // is actually created, never for a cached one.
+      if (!handedOut.has(next)) {
+        handedOut.add(next);
+        seedCalls.push({ threadRootId, contextLines: acquireOptions.contextLines ?? [] });
+        await acquireOptions.seed?.();
+      }
+      return next;
     },
+    releaseChannelSessions: async () => {
+      releasedChannelSessions += 1;
+      handedOut.clear();
+    },
+    fetchHistory: async (event, _threadRootId, opts) => {
+      historyCalls.push({
+        eventId: event.id,
+        mode: opts.mode,
+        ...(opts.sinceExclusive !== undefined ? { sinceExclusive: opts.sinceExclusive } : {}),
+      });
+      return opts.mode === "seed" ? (options.seedHistory ?? []) : (options.deltaHistory ?? []);
+    },
+    resolveAuthorLabel: async (pubkey) => options.labels?.[pubkey] ?? null,
+    selfName: "Линкед Коуч",
     observeUsage: (sessionId, turnId) => observed.push({ sessionId, turnId }),
     publishUsage: (turn, _sessionId, stopReason) => usage.push({ turnId: turn.turnId, stopReason }),
     newTurnId: () => `turn-${++turnSeq}`,
@@ -86,7 +116,9 @@ function setup(
     output,
     usage,
     observed,
-    contextCalls,
+    historyCalls,
+    seedCalls,
+    releasedChannelSessions: () => releasedChannelSessions,
   };
 }
 
@@ -104,8 +136,14 @@ describe("primary turn", () => {
     await actor.drain();
 
     expect(session.prompts).toHaveLength(1);
-    expect(session.prompts[0]).toContain(`Event ID: ${trigger.id}`);
-    expect(session.prompts[0]).toContain(`hex: ${USER_A_PUBKEY}`);
+    expect(session.prompts[0]).toBe(
+      [
+        `From: ${npubEncode(USER_A_PUBKEY)}`,
+        `Time: ${new Date(trigger.created_at * 1000).toISOString()}`,
+        "Content:",
+        "@agent hello",
+      ].join("\n"),
+    );
 
     session.emitAssistantMessage("m1", "first answer");
     session.emitAssistantMessage("m2", "second answer");
@@ -131,15 +169,15 @@ describe("primary turn", () => {
   });
 });
 
-describe("context fetching", () => {
-  it("passes the session's pre-prompt history state into fetchContext", async () => {
-    const { actor, session, contextCalls } = setup();
+describe("session seeding and context top-up", () => {
+  it("seeds a fresh session once, then tops up later turns with a delta fetch", async () => {
+    const { actor, session, historyCalls } = setup();
     const first = chatEvent({ channelId: CHANNEL, content: "first" });
     actor.submit({ event: first, promptTag: "@mention" });
     await actor.drain();
 
-    // The fresh session had no history when the first turn fetched context.
-    expect(contextCalls).toEqual([{ eventId: first.id, sessionHasHistory: false }]);
+    // A brand-new session is seeded, not topped up.
+    expect(historyCalls).toEqual([{ eventId: first.id, mode: "seed" }]);
 
     session.emit({ type: "agent_settled" });
     await actor.drain();
@@ -148,8 +186,71 @@ describe("context fetching", () => {
     actor.submit({ event: second, promptTag: "@mention" });
     await actor.drain();
 
-    // After the first prompt the session carries the conversation itself.
-    expect(contextCalls[1]).toEqual({ eventId: second.id, sessionHasHistory: true });
+    // The continuing session fetches only what arrived after the first trigger.
+    expect(historyCalls[1]).toEqual({
+      eventId: second.id,
+      mode: "delta",
+      sinceExclusive: first.created_at,
+    });
+  });
+
+  it("injects delta messages as user context blocks before the trigger prompt", async () => {
+    const missed: HistoryMessage = {
+      eventId: "e".repeat(64),
+      authorPubkey: USER_B_PUBKEY,
+      createdAt: 1_700_000_500,
+      content: "missed while idle",
+      fromAgent: false,
+    };
+    const { actor, session } = setup({ deltaHistory: [missed], labels: { [USER_B_PUBKEY]: "bob" } });
+
+    const first = chatEvent({ channelId: CHANNEL, content: "first" });
+    actor.submit({ event: first, promptTag: "@mention" });
+    await actor.drain();
+    expect(session.injected).toHaveLength(0); // seeded turn: nothing to top up
+
+    session.emit({ type: "agent_settled" });
+    await actor.drain();
+
+    actor.submit({ event: chatEvent({ channelId: CHANNEL, content: "second" }), promptTag: "@mention" });
+    await actor.drain();
+
+    expect(session.injected).toEqual([
+      ["From: @bob", "Time: 2023-11-14T22:21:40.000Z", "Content:", "missed while idle"].join("\n"),
+    ]);
+    // Injection lands before the trigger prompt of the same turn.
+    expect(session.prompts).toHaveLength(2);
+  });
+
+  it("passes system-prompt context lines when creating a session", async () => {
+    const { actor, seedCalls } = setup();
+    const trigger = chatEvent({ channelId: CHANNEL, content: "hello" });
+    actor.submit({ event: trigger, promptTag: "@mention" });
+    await actor.drain();
+
+    expect(seedCalls).toHaveLength(1);
+    expect(seedCalls[0]?.threadRootId).toBeNull(); // top-level → channel session
+    expect(seedCalls[0]?.contextLines).toEqual([
+      "Scope: channel",
+      `Channel: general (#${CHANNEL})`,
+      "Self username: @Линкед Коуч",
+      "Replies: your visible answer is published to this channel automatically as a reply to the triggering message. Do not attempt to send it yourself.",
+      `Buzz CLI: \`buzz messages get --channel ${CHANNEL}\` reads recent channel history; \`buzz messages thread --channel ${CHANNEL} --event <root-id>\` reads a thread.`,
+    ]);
+  });
+
+  it("binds a threaded trigger to its own thread session", async () => {
+    const root = chatEvent({ channelId: CHANNEL, content: "root" });
+    const { actor, seedCalls } = setup();
+    actor.submit({
+      event: replyEvent({ channelId: CHANNEL, content: "in thread", rootEventId: root.id }),
+      promptTag: "@mention",
+    });
+    await actor.drain();
+
+    expect(seedCalls[0]?.threadRootId).toBe(root.id);
+    expect(seedCalls[0]?.contextLines).toContain(`Thread root: ${root.id}`);
+    expect(seedCalls[0]?.contextLines).toContain("Scope: thread");
   });
 });
 
@@ -235,7 +336,9 @@ describe("same-thread steering", () => {
 
     expect(session.prompts).toHaveLength(1);
     expect(session.steers).toHaveLength(1);
-    expect(session.steers[0]).toContain(followUp.id);
+    expect(session.steers[0]).toContain("[Steering]");
+    expect(session.steers[0]).toContain("also consider this");
+    expect(session.steers[0]).toContain(`From: ${npubEncode(USER_B_PUBKEY)}`);
     expect(state.dispositions.get(followUp.id)).toBe("steer_delivered");
   });
 
@@ -286,7 +389,7 @@ describe("same-thread steering", () => {
     await actor.drain();
 
     expect(session.prompts).toHaveLength(2);
-    expect(session.prompts[1]).toContain(other.id);
+    expect(session.prompts[1]).toContain("unrelated thread");
   });
 
   it("starts a new turn for a same-thread message that arrives after settling", async () => {
@@ -333,7 +436,7 @@ describe("same-thread steering", () => {
     await actor.drain();
 
     expect(session.prompts).toHaveLength(2);
-    expect(session.prompts[1]).toContain(followUp.id);
+    expect(session.prompts[1]).toContain("raced");
   });
 });
 
@@ -591,7 +694,8 @@ describe("tracing port", () => {
       systemPrompt: "test system prompt",
       model: "test/model",
     });
-    expect(started?.info.prompt).toContain(`Event ID: ${trigger.id}`);
+    expect(started?.info.prompt).toContain("@agent hello");
+    expect(started?.info.prompt).toContain(`From: ${npubEncode(USER_A_PUBKEY)}`);
 
     // The raw Pi stream reaches the trace, `message_end` included.
     expect(tracing.ofKind("event").map((call) => call.event.type)).toEqual([
@@ -626,7 +730,7 @@ describe("tracing port", () => {
     const [steering] = tracing.ofKind("steering");
     expect(steering?.turnId).toBe("turn-1");
     expect(steering?.authorPubkey).toBe(USER_B_PUBKEY);
-    expect(steering?.text).toContain(followUp.id);
+    expect(steering?.text).toContain("also consider this");
   });
 
   it("closes the trace with the cancellation reason when a turn is aborted", async () => {

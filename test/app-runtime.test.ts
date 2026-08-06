@@ -128,7 +128,7 @@ async function boot(overrides: Partial<AgentConfig> = {}): Promise<Harness> {
     sessions: {
       acquire: async () => session,
       release: async () => {},
-      rotate: async () => session,
+      releaseForChannel: async () => {},
       disposeAll: async () => {},
     },
   });
@@ -349,7 +349,7 @@ describe("end to end", () => {
     await settle();
 
     expect(harness.session.prompts).toHaveLength(1);
-    expect(harness.session.prompts[0]).toContain(`Event ID: ${trigger.id}`);
+    expect(harness.session.prompts[0]).toContain("Content:\n@agent what is the status?");
 
     harness.session.emitAssistantMessage("m1", "All green.");
     harness.session.emit({ type: "agent_settled" });

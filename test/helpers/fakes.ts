@@ -276,6 +276,8 @@ export class FakeSession implements AgentSessionHandle {
   hasHistory = false;
   readonly prompts: string[] = [];
   readonly steers: string[] = [];
+  /** Context blocks folded in via `injectContext`, oldest first. */
+  readonly injected: string[] = [];
   aborted = 0;
   steerRejects = false;
   disposed = false;
@@ -295,6 +297,9 @@ export class FakeSession implements AgentSessionHandle {
   async steer(text: string): Promise<void> {
     if (this.steerRejects) throw new Error("session is not streaming");
     this.steers.push(text);
+  }
+  async injectContext(text: string): Promise<void> {
+    this.injected.push(text);
   }
   async abort(): Promise<void> {
     this.aborted += 1;
