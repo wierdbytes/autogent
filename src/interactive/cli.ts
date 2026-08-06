@@ -32,6 +32,7 @@ import {
 } from "../backend-k8s/config.js";
 import { podVerdict } from "../backend-k8s/deploy.js";
 import { redeployProfile } from "../backend-k8s/redeploy.js";
+import { pushProfileAuth } from "../backend-k8s/push-auth.js";
 import { deleteAndWait, getJson, kubectl } from "../backend-k8s/kubectl.js";
 import { podName } from "../backend-k8s/names.js";
 import { listAuthedCatalog, type AuthedProviderCatalog } from "../owner-auth/catalog.js";
@@ -41,6 +42,7 @@ import {
   PROFILE_NAME_RE,
   ensureProfileAuthDir,
   profileAuthPath,
+  readProfileAuth,
   readProfileLangfuseKeys,
   readProfiles,
   removeProfile,
@@ -725,7 +727,13 @@ async function profileMenu(name: string): Promise<void> {
           : []),
         { value: "edit", label: "Edit substrate parameters (cluster, image, storage)" },
         { value: "agent", label: "Edit agent settings (model, effort, prompt, …)" },
-        { value: "login", label: loggedIn ? "Re-run OAuth login" : "Run OAuth login (missing!)" },
+        {
+          value: "login",
+          label: loggedIn ? "Re-run provider login" : "Run provider login (missing!)",
+          ...(profile.agentPubkey !== null
+            ? { hint: "the new credential is pushed to the running agent immediately" }
+            : {}),
+        },
         { value: "delete", label: "Delete profile" },
         { value: "back", label: "Back" },
       ],
@@ -843,7 +851,39 @@ async function profileMenu(name: string): Promise<void> {
     }
 
     if (action === "login") {
-      await loginStep(profile.name);
+      if (!(await loginStep(profile.name))) continue;
+      // A never-deployed profile has no agent to push to: the credential is
+      // adopted into the per-agent store at first deploy, as before.
+      if (profile.agentPubkey === null) continue;
+
+      const authJson = await readProfileAuth(profile.name);
+      if (authJson === null) {
+        p.log.warn("Credential file could not be read back — nothing was pushed");
+        continue;
+      }
+      const spinner = p.spinner();
+      spinner.start("Pushing the new credential to the relay");
+      const outcome = await pushProfileAuth({
+        profile,
+        authJson,
+        report: (message) => spinner.message(message),
+      });
+      if (outcome.state === "pushed") {
+        spinner.stop("autogent/auth republished — the running agent picks it up live");
+      } else if (outcome.state === "conflict") {
+        spinner.stop("credential push refused");
+        p.log.error(
+          `this provider account is already bound to agent ` +
+            `${outcome.conflict.agentPubkey.slice(0, 12)}… — one account drives exactly ` +
+            "one agent",
+        );
+      } else {
+        spinner.stop("credential stored locally only");
+        p.log.warn(
+          `The credential is saved for this agent and will be published on the next ` +
+            `deploy/redeploy: ${outcome.reason}`,
+        );
+      }
       continue;
     }
 
@@ -929,7 +969,8 @@ Usage:
   autogent --help   this text
 
 Agents are configured here — the substrate (kube context, namespace, image,
-pi extensions, storage, idle timeout), the mandatory pi provider login and
+pi extensions, storage, idle timeout), the mandatory pi provider login (for an
+already-deployed profile a re-login is pushed to the running agent at once) and
 the agent settings (model, reasoning effort, system prompt, respond gate,
 tools, scheduler ceilings, Langfuse tracing with its privacy preset and API
 keys; model/effort offer only providers with a stored login) — and then

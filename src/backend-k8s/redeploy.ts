@@ -84,11 +84,17 @@ function referencedSecretName(pod: Record<string, unknown> | null): string | nul
   return null;
 }
 
+/** The cluster readers this module needs; injected wholesale in tests. */
+export interface BootstrapIo {
+  getJson: typeof getJson;
+  listJson: typeof listJson;
+}
+
 async function findBootstrapSecret(
   agentPubkey: string,
   pod: Record<string, unknown> | null,
   kube: KubectlOptions,
-  io: Required<Pick<RedeployInput, "getJson" | "listJson">>,
+  io: BootstrapIo,
 ): Promise<Record<string, unknown>> {
   // Prefer the Secret the running Pod references — by construction it is the
   // current generation. Without a Pod, fall back to the newest labelled one
@@ -111,6 +117,25 @@ async function findBootstrapSecret(
     return at.localeCompare(bt);
   });
   return byCreation[byCreation.length - 1]!;
+}
+
+/**
+ * Reads the bootstrap triple back from the cluster (pod-referenced Secret
+ * preferred). The Pod object is returned alongside because callers that
+ * rebuild a deploy payload also need its passthrough env — fetching it twice
+ * would be a second round-trip for the same object.
+ *
+ * Throws (via `fail`) when the cluster holds no usable Secret: the identity
+ * lives only there, so there is nothing to reconstruct from.
+ */
+export async function readBootstrapTriple(
+  agentPubkey: string,
+  kube: KubectlOptions,
+  io: BootstrapIo,
+): Promise<{ triple: BootstrapTriple; pod: Record<string, unknown> | null }> {
+  const pod = await io.getJson("pod", podName(agentPubkey), kube);
+  const secret = await findBootstrapSecret(agentPubkey, pod, kube, io);
+  return { triple: bootstrapFromSecret(secret), pod };
 }
 
 export interface RedeployInput {
@@ -143,9 +168,7 @@ export async function redeployProfile(input: RedeployInput): Promise<K8sDeployOu
 
   report("Reading the bootstrap Secret from the cluster");
   const io = { getJson: input.getJson ?? getJson, listJson: input.listJson ?? listJson };
-  const pod = await io.getJson("pod", podName(profile.agentPubkey), kube);
-  const secret = await findBootstrapSecret(profile.agentPubkey, pod, kube, io);
-  const triple = bootstrapFromSecret(secret);
+  const { triple, pod } = await readBootstrapTriple(profile.agentPubkey, kube, io);
   const passthrough = passthroughEnvFromPod(pod);
 
   // The same fail-closed parser as the wire path: identity is re-derived from
