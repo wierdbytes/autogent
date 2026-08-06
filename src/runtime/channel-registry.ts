@@ -21,7 +21,6 @@ import type {
   SessionRegistryPort,
   StatePort,
   TelemetryPort,
-  TracingPort,
 } from "./ports.js";
 import type { AcquireSessionOptions } from "./ports.js";
 import type { OutputRouter } from "./output-router.js";
@@ -37,8 +36,6 @@ export interface ChannelRegistryDeps {
   relayId: string;
   state: StatePort;
   telemetry: TelemetryPort;
-  /** Shared by every channel; a no-op unless tracing is configured. */
-  tracing: TracingPort;
   output: OutputRouter;
   sessions: SessionRegistryPort;
   clock: Clock;
@@ -112,7 +109,6 @@ export class ChannelRegistry {
       channelType: descriptor.channelType,
       state: this.deps.state,
       telemetry: this.deps.telemetry,
-      tracing: this.deps.tracing,
       output: this.deps.output,
       clock: this.deps.clock,
       logger: this.deps.logger.child({ channelId: descriptor.channelId }),

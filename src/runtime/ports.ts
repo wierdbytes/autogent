@@ -13,7 +13,6 @@
 
 import type { NostrEvent, NostrFilter, UnsignedNostrEvent } from "../nostr/types.js";
 import type { ObserverEvent } from "../telemetry/observer-envelope.js";
-import type { ChannelType } from "./prompt-formatter.js";
 
 /* -------------------------------------------------------------------------- */
 /* Ambient services                                                           */
@@ -293,63 +292,6 @@ export interface TelemetryPort {
    * caller must invoke exactly once when the turn settles.
    */
   trackTurn(route: TelemetryTurnRoute): () => void;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Tracing                                                                    */
-/* -------------------------------------------------------------------------- */
-
-/** Turn identity and input, captured once at the start of a turn. */
-export interface TracingTurnInfo {
-  channelType: ChannelType;
-  channelName: string | null;
-  authorPubkey: string;
-  triggeringEventIds: string[];
-  prompt: string;
-  /**
-   * Full effective system prompt of the session at the moment the turn starts,
-   * straight from the SDK getter (base prompt + tool guidelines + the owner's
-   * appendSystemPrompt + per-turn extension modifications).
-   */
-  systemPrompt: string | undefined;
-  model: string | undefined;
-}
-
-/**
- * Turn-level tracing sink (Langfuse plan §4).
- *
- * Deliberately separate from {@link TelemetryPort}: that one carries lossy,
- * ACP-shaped frames for Desktop, while a tracing backend needs the raw
- * {@link PiEvent} stream plus the Nostr identity of the turn. Every method is
- * fire-and-forget and must never throw — tracing may not affect a turn.
- */
-export interface TracingPort {
-  /** Turn started: identity plus input. Never throws. */
-  turnStarted(route: TelemetryTurnRoute, info: TracingTurnInfo): void;
-  /** A normalised Pi event observed inside the turn. */
-  event(turnId: string, event: PiEvent): void;
-  /** Steering input that was successfully delivered into a running turn. */
-  steering(turnId: string, text: string, authorPubkey: string): void;
-  /** Turn settled; closes the trace. */
-  turnFinished(turnId: string, outcome: { stopReason: string; finalText: string | null }): void;
-  /** Drains the queue; called on settle and during shutdown. */
-  flush(): Promise<void>;
-  shutdown(budgetMs: number): Promise<void>;
-}
-
-/**
- * The default: tracing wired everywhere, doing nothing.
- *
- * Keeps the actor free of `if (tracing)` branches and keeps the whole wiring
- * exercised by tests even when no backend is configured.
- */
-export class NoopTracingPort implements TracingPort {
-  turnStarted(): void {}
-  event(): void {}
-  steering(): void {}
-  turnFinished(): void {}
-  async flush(): Promise<void> {}
-  async shutdown(): Promise<void> {}
 }
 
 /* -------------------------------------------------------------------------- */

@@ -1,7 +1,10 @@
 # Langfuse tracing — план интеграции
 
 **Дата:** 2026-08-06
-**Статус:** Design / implementation plan
+**Статус:** Superseded — собственный `LangfusePublisher` удалён; трейсинг
+делегирован pi-экстеншену `pi-langfuse` (см. §Langfuse tracing в
+`docs/runbook-remote.md` и `src/runtime/langfuse-extension.ts`). Решение §1.2
+пересмотрено.
 **Область:** `autogent-nostr` runtime, config record schema, owner-side CLI
 
 ---

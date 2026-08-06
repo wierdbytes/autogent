@@ -21,6 +21,7 @@
 
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { normalizeLangfusePrivacy } from "../config.js";
 import type { LangfusePrivacyPreset, RespondToMode } from "../config.js";
 import type { LangfuseCredentials } from "../runtime/provider-auth.js";
 import { langfuseCredentialsFromValue } from "../runtime/provider-auth.js";
@@ -58,14 +59,12 @@ export interface AgentSettings {
   maxConcurrentTurns: number | null;
   /** Prior messages fetched per turn; null = runtime default. */
   contextMessageLimit: number | null;
-  /** Send traces to Langfuse (tracing plan §5.3). */
+  /** Send traces to Langfuse via the pi-langfuse extension. */
   langfuseEnabled: boolean;
   /** Langfuse base URL; null = cloud default. */
   langfuseHost: string | null;
   /** Privacy preset; null = runtime default ("conversations"). */
   langfusePrivacy: LangfusePrivacyPreset | null;
-  /** Turn sampling rate 0..1; null = runtime default (1). */
-  langfuseSampleRate: number | null;
 }
 
 export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
@@ -81,7 +80,6 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   langfuseEnabled: false,
   langfuseHost: null,
   langfusePrivacy: null,
-  langfuseSampleRate: null,
 };
 
 export interface DeployProfile extends AgentSettings {
@@ -153,11 +151,7 @@ function stringList(value: unknown): string[] {
 
 const RESPOND_TO_MODES: readonly RespondToMode[] = ["owner-only", "allowlist", "anyone", "nobody"];
 
-const LANGFUSE_PRIVACY_PRESETS: readonly LangfusePrivacyPreset[] = [
-  "metadata-only",
-  "conversations",
-  "full",
-];
+
 
 /** Registry files written before a field existed get that field's default. */
 function normalize(profile: DeployProfile): DeployProfile {
@@ -183,18 +177,8 @@ function normalize(profile: DeployProfile): DeployProfile {
     contextMessageLimit: optionalCount(raw.contextMessageLimit),
     langfuseEnabled: raw.langfuseEnabled === true,
     langfuseHost: optionalString(raw.langfuseHost),
-    langfusePrivacy: LANGFUSE_PRIVACY_PRESETS.includes(raw.langfusePrivacy as LangfusePrivacyPreset)
-      ? (raw.langfusePrivacy as LangfusePrivacyPreset)
-      : null,
-    // Out-of-range or non-finite sample rates fall back to the runtime default
-    // rather than silently disabling (0) or over-sampling.
-    langfuseSampleRate:
-      typeof raw.langfuseSampleRate === "number" &&
-      Number.isFinite(raw.langfuseSampleRate) &&
-      raw.langfuseSampleRate >= 0 &&
-      raw.langfuseSampleRate <= 1
-        ? raw.langfuseSampleRate
-        : null,
+    // Tolerates the legacy `full` spelling from pre-extension registry files.
+    langfusePrivacy: normalizeLangfusePrivacy(raw.langfusePrivacy),
   };
 }
 

@@ -21,12 +21,30 @@ export type SubscribeMode = "mentions" | "all";
 export type OversizeOutputPolicy = "split" | "truncate" | "reject";
 
 /**
- * How much of a turn reaches Langfuse (tracing plan §6).
+ * How much of a turn reaches Langfuse.
  *
- * `metadata-only` — shapes and counters, no user text; `conversations` — prompts
- * and completions but no tool payloads; `full` — everything, redaction aside.
+ * These are the pi-langfuse extension's capture presets, passed through as
+ * `LANGFUSE_PRIVACY_PRESET`: `metadata-only` — shapes and counters, no user
+ * text; `prompts-only` — inputs plus metadata; `conversations` — prompts and
+ * completions but no tool payloads; `full-debug` — everything, redaction aside.
  */
-export type LangfusePrivacyPreset = "metadata-only" | "conversations" | "full";
+export type LangfusePrivacyPreset =
+  | "metadata-only"
+  | "prompts-only"
+  | "conversations"
+  | "full-debug";
+
+/**
+ * Accepts a preset name, tolerating the legacy `full` spelling from configs
+ * written before tracing moved to the pi-langfuse extension.
+ */
+export function normalizeLangfusePrivacy(value: unknown): LangfusePrivacyPreset | null {
+  if (typeof value !== "string") return null;
+  if (value === "full") return "full-debug";
+  return (LANGFUSE_PRIVACY_PRESETS as readonly string[]).includes(value)
+    ? (value as LangfusePrivacyPreset)
+    : null;
+}
 
 export interface PiConfig {
   /** Working directory for the agent's tools. Also the session bucket key. */
@@ -76,25 +94,20 @@ export interface SchedulerConfig {
 }
 
 /**
- * Langfuse trace export (tracing plan §5.1).
+ * Langfuse tracing via the pi-langfuse extension.
  *
+ * When enabled, the runtime loads the `npm:pi-langfuse` Pi extension into
+ * every session and passes host/privacy through its environment surface.
  * Credentials are deliberately absent: `publicKey`/`secretKey` are resolved
  * separately (runtime/provider-auth.ts) so they never land in a config object
  * or a log line, matching the no-secrets invariant of this module.
  */
 export interface LangfuseConfig {
   enabled: boolean;
-  /** Ingestion host — cloud or self-hosted. */
+  /** Ingestion host — cloud or self-hosted (`LANGFUSE_BASE_URL`). */
   host: string;
+  /** Capture preset (`LANGFUSE_PRIVACY_PRESET`). */
   privacy: LangfusePrivacyPreset;
-  /** Fraction of turns traced, 0..1. */
-  sampleRate: number;
-  /**
-   * Langfuse environment label. Left unset here; the publisher resolves it as
-   * `remote.recordConfig ? "remote" : "local"` when emitting traces, so the
-   * default follows the deployment mode instead of being frozen at parse time.
-   */
-  environment?: string;
 }
 
 export interface TelemetryConfig {
@@ -207,7 +220,6 @@ export function defaultConfig(): AgentConfig {
         enabled: false,
         host: "https://cloud.langfuse.com",
         privacy: "conversations",
-        sampleRate: 1,
       },
     },
     output: { maxMessageBytes: 16_000, oversizePolicy: "split" },
@@ -251,10 +263,11 @@ function envList(name: string): string[] | undefined {
 
 const RESPOND_TO_MODES: readonly RespondToMode[] = ["owner-only", "allowlist", "anyone", "nobody"];
 
-const LANGFUSE_PRIVACY_PRESETS: readonly LangfusePrivacyPreset[] = [
+export const LANGFUSE_PRIVACY_PRESETS: readonly LangfusePrivacyPreset[] = [
   "metadata-only",
+  "prompts-only",
   "conversations",
-  "full",
+  "full-debug",
 ];
 
 /**
@@ -307,12 +320,8 @@ export function applyEnv(base: AgentConfig, env = process.env): AgentConfig {
   const langfuse = next.telemetry.langfuse;
   langfuse.enabled = envBool("AUTOGENT_LANGFUSE") ?? langfuse.enabled;
   langfuse.host = envString("AUTOGENT_LANGFUSE_HOST") ?? langfuse.host;
-  const langfusePrivacy = envString("AUTOGENT_LANGFUSE_PRIVACY") as LangfusePrivacyPreset | undefined;
-  if (langfusePrivacy && LANGFUSE_PRIVACY_PRESETS.includes(langfusePrivacy)) {
-    langfuse.privacy = langfusePrivacy;
-  }
-  langfuse.sampleRate = envNumber("AUTOGENT_LANGFUSE_SAMPLE") ?? langfuse.sampleRate;
-  langfuse.environment = envString("AUTOGENT_LANGFUSE_ENV") ?? langfuse.environment;
+  const langfusePrivacy = normalizeLangfusePrivacy(envString("AUTOGENT_LANGFUSE_PRIVACY"));
+  if (langfusePrivacy) langfuse.privacy = langfusePrivacy;
 
   next.presence.enabled = envBool("AUTOGENT_PRESENCE") ?? next.presence.enabled;
   next.profile.name = envString("AUTOGENT_PROFILE_NAME") ?? next.profile.name;
@@ -368,14 +377,11 @@ export function validateConfig(config: AgentConfig): string[] {
   if (config.lifecycle.shutdownBudgetSec < 10) {
     problems.push("lifecycle.shutdownBudgetSec must be at least 10 seconds");
   }
-  // Only a switched-on exporter is validated: a stale or garbage value behind
-  // `enabled: false` cannot affect the agent, and refusing to boot over it
-  // would be a needless outage.
+  // Only a switched-on integration is validated: a stale or garbage value
+  // behind `enabled: false` cannot affect the agent, and refusing to boot over
+  // it would be a needless outage.
   if (config.telemetry.langfuse.enabled) {
-    const { host, sampleRate } = config.telemetry.langfuse;
-    if (!Number.isFinite(sampleRate) || sampleRate < 0 || sampleRate > 1) {
-      problems.push(`telemetry.langfuse.sampleRate must be between 0 and 1 (got ${sampleRate})`);
-    }
+    const { host } = config.telemetry.langfuse;
     if (!/^https?:\/\//.test(host)) {
       problems.push(`telemetry.langfuse.host must start with http:// or https:// (got ${host})`);
     }

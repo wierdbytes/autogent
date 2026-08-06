@@ -7,13 +7,11 @@ import { FakeClock } from "../src/runtime/clock.js";
 import { nullLogger } from "../src/runtime/logger.js";
 import { tagValue, tagsNamed } from "../src/nostr/types.js";
 import type { NostrEvent } from "../src/nostr/types.js";
-import { NoopTracingPort } from "../src/runtime/ports.js";
 import {
   AGENT_PUBKEY,
   FakeEventBuilder,
   FakeSession,
   FakeTelemetry,
-  RecordingTracingPort,
   USER_A_PUBKEY,
   USER_B_PUBKEY,
   USER_B_SECRET,
@@ -28,7 +26,6 @@ function setup(
   options: {
     session?: FakeSession;
     acquireSequence?: FakeSession[];
-    tracing?: RecordingTracingPort;
     /** Returned by fetchHistory in seed mode. */
     seedHistory?: HistoryMessage[];
     /** Returned by fetchHistory in delta mode. */
@@ -40,7 +37,6 @@ function setup(
   const clock = new FakeClock();
   const state = fakeState();
   const telemetry = new FakeTelemetry();
-  const tracing = options.tracing ?? new NoopTracingPort();
   const outbox = state.outbox;
   const session = options.session ?? options.acquireSequence?.[0] ?? new FakeSession();
   let acquireCalls = 0;
@@ -68,7 +64,6 @@ function setup(
     channelType: "stream",
     state,
     telemetry,
-    tracing,
     output,
     clock,
     logger: nullLogger,
@@ -111,7 +106,6 @@ function setup(
     clock,
     state,
     telemetry,
-    tracing,
     session,
     output,
     usage,
@@ -657,107 +651,6 @@ describe("telemetry shape", () => {
     session.emit({ type: "agent_settled" });
     await actor.drain();
     expect(telemetry.trackedTurns).toEqual([{ turnId, stopped: 1 }]);
-  });
-});
-
-describe("tracing port", () => {
-  it("reports a turn as turnStarted, then events, then turnFinished", async () => {
-    const tracing = new RecordingTracingPort();
-    const { actor, session } = setup({ tracing });
-    const trigger = chatEvent({ channelId: CHANNEL, content: "@agent hello" });
-
-    actor.submit({ event: trigger, promptTag: "@mention" });
-    await actor.drain();
-
-    session.emit({ type: "text_delta", messageId: "m1", delta: "answ" });
-    session.emitAssistantMessage("m1", "the answer");
-    session.emit({ type: "agent_end", willRetry: false });
-    session.emit({ type: "agent_settled" });
-    await actor.drain();
-
-    const kinds = tracing.calls.map((call) => call.kind);
-    expect(kinds[0]).toBe("turnStarted");
-    expect(kinds.slice(1, -2)).toEqual(["event", "event", "event", "event"]);
-    expect(kinds.slice(-2)).toEqual(["turnFinished", "flush"]);
-
-    const [started] = tracing.ofKind("turnStarted");
-    expect(started?.route).toMatchObject({
-      channelId: CHANNEL,
-      sessionId: session.sessionId,
-      turnId: "turn-1",
-    });
-    expect(started?.info).toMatchObject({
-      channelType: "stream",
-      channelName: "general",
-      authorPubkey: USER_A_PUBKEY,
-      triggeringEventIds: [trigger.id],
-      systemPrompt: "test system prompt",
-      model: "test/model",
-    });
-    expect(started?.info.prompt).toContain("@agent hello");
-    expect(started?.info.prompt).toContain(`From: ${npubEncode(USER_A_PUBKEY)}`);
-
-    // The raw Pi stream reaches the trace, `message_end` included.
-    expect(tracing.ofKind("event").map((call) => call.event.type)).toEqual([
-      "text_delta",
-      "message_end",
-      "agent_end",
-      "agent_settled",
-    ]);
-    for (const call of tracing.ofKind("event")) expect(call.turnId).toBe("turn-1");
-
-    expect(tracing.ofKind("turnFinished")).toEqual([
-      { kind: "turnFinished", turnId: "turn-1", stopReason: "end_turn", finalText: "the answer" },
-    ]);
-  });
-
-  it("records delivered steering with its author", async () => {
-    const tracing = new RecordingTracingPort();
-    const { actor } = setup({ tracing });
-    const trigger = chatEvent({ channelId: CHANNEL, content: "start" });
-    actor.submit({ event: trigger, promptTag: "@mention" });
-    await actor.drain();
-
-    const followUp = replyEvent({
-      secret: USER_B_SECRET,
-      channelId: CHANNEL,
-      content: "also consider this",
-      rootEventId: trigger.id,
-    });
-    actor.submit({ event: followUp, promptTag: "@mention" });
-    await actor.drain();
-
-    const [steering] = tracing.ofKind("steering");
-    expect(steering?.turnId).toBe("turn-1");
-    expect(steering?.authorPubkey).toBe(USER_B_PUBKEY);
-    expect(steering?.text).toContain("also consider this");
-  });
-
-  it("closes the trace with the cancellation reason when a turn is aborted", async () => {
-    const tracing = new RecordingTracingPort();
-    const { actor, session } = setup({ tracing });
-    actor.submit({ event: chatEvent({ channelId: CHANNEL, content: "go" }), promptTag: "@mention" });
-    await actor.drain();
-
-    session.emitAssistantMessage("m1", "partial answer");
-    await actor.drain();
-
-    actor.cancel("idle_timeout");
-    await actor.drain();
-
-    expect(tracing.ofKind("turnFinished")).toEqual([
-      {
-        kind: "turnFinished",
-        turnId: "turn-1",
-        stopReason: "idle_timeout",
-        finalText: "partial answer",
-      },
-    ]);
-
-    // The straggling settle of the aborted run must not open a second trace.
-    session.emit({ type: "agent_settled" });
-    await actor.drain();
-    expect(tracing.ofKind("turnFinished")).toHaveLength(1);
   });
 });
 

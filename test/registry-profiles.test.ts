@@ -144,20 +144,26 @@ describe("profile registry", () => {
       profile({
         langfuseEnabled: true,
         langfuseHost: "https://langfuse.internal",
-        langfusePrivacy: "full",
-        langfuseSampleRate: 0.25,
+        langfusePrivacy: "full-debug",
       }),
     );
     expect(await getProfile("my-agent")).toMatchObject({
       langfuseEnabled: true,
       langfuseHost: "https://langfuse.internal",
-      langfusePrivacy: "full",
-      langfuseSampleRate: 0.25,
+      langfusePrivacy: "full-debug",
     });
+
+    // A pre-extension registry file may still say `full`.
+    const legacyPreset = profile({ langfuseEnabled: true }) as unknown as Record<string, unknown>;
+    legacyPreset["langfusePrivacy"] = "full";
+    await writeFile(
+      join(root, "registry.json"),
+      JSON.stringify({ version: 1, profiles: [legacyPreset] }),
+    );
+    expect(await getProfile("my-agent")).toMatchObject({ langfusePrivacy: "full-debug" });
 
     const mangled = profile({ langfuseEnabled: true }) as unknown as Record<string, unknown>;
     mangled["langfusePrivacy"] = "bogus";
-    mangled["langfuseSampleRate"] = 2;
     mangled["langfuseHost"] = "";
     await writeFile(
       join(root, "registry.json"),
@@ -167,7 +173,6 @@ describe("profile registry", () => {
       langfuseEnabled: true,
       langfuseHost: null,
       langfusePrivacy: null,
-      langfuseSampleRate: null,
     });
   });
 
@@ -184,7 +189,6 @@ describe("profile registry", () => {
       langfuseEnabled: false,
       langfuseHost: null,
       langfusePrivacy: null,
-      langfuseSampleRate: null,
     });
   });
 

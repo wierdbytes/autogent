@@ -13,8 +13,6 @@ import type {
   StatePort,
   TelemetryPort,
   TelemetryTurnRoute,
-  TracingPort,
-  TracingTurnInfo,
 } from "../../src/runtime/ports.js";
 
 export const AGENT_SECRET = new Uint8Array(32).fill(11);
@@ -213,46 +211,6 @@ export class FakeTelemetry implements TelemetryPort {
   }
   ofKind(kind: string): ObserverFrameDraft[] {
     return this.frames.filter((frame) => frame.kind === kind);
-  }
-}
-
-/** One recorded {@link TracingPort} call, in the order the actor made it. */
-export type TracingCall =
-  | { kind: "turnStarted"; route: TelemetryTurnRoute; info: TracingTurnInfo }
-  | { kind: "event"; turnId: string; event: PiEvent }
-  | { kind: "steering"; turnId: string; text: string; authorPubkey: string }
-  | { kind: "turnFinished"; turnId: string; stopReason: string; finalText: string | null }
-  | { kind: "flush" }
-  | { kind: "shutdown"; budgetMs: number };
-
-/** Tracing port that records the call sequence instead of exporting anything. */
-export class RecordingTracingPort implements TracingPort {
-  readonly calls: TracingCall[] = [];
-
-  turnStarted(route: TelemetryTurnRoute, info: TracingTurnInfo): void {
-    this.calls.push({ kind: "turnStarted", route, info });
-  }
-  event(turnId: string, event: PiEvent): void {
-    this.calls.push({ kind: "event", turnId, event });
-  }
-  steering(turnId: string, text: string, authorPubkey: string): void {
-    this.calls.push({ kind: "steering", turnId, text, authorPubkey });
-  }
-  turnFinished(turnId: string, outcome: { stopReason: string; finalText: string | null }): void {
-    this.calls.push({ kind: "turnFinished", turnId, ...outcome });
-  }
-  async flush(): Promise<void> {
-    this.calls.push({ kind: "flush" });
-  }
-  async shutdown(budgetMs: number): Promise<void> {
-    this.calls.push({ kind: "shutdown", budgetMs });
-  }
-
-  /** The recorded calls of one kind, oldest first. */
-  ofKind<K extends TracingCall["kind"]>(kind: K): Array<Extract<TracingCall, { kind: K }>> {
-    return this.calls.filter(
-      (call): call is Extract<TracingCall, { kind: K }> => call.kind === kind,
-    );
   }
 }
 

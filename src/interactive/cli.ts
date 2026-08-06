@@ -89,10 +89,10 @@ function deployedHint(profile: DeployProfile, loggedIn: boolean): string {
 /** One line for the Langfuse axis: the settings plus whether keys are here. */
 function langfuseSummary(profile: DeployProfile, keysStored: boolean): string {
   if (!profile.langfuseEnabled) return "disabled";
+
   const settings = [
     profile.langfusePrivacy ?? "conversations (default)",
     profile.langfuseHost ?? "cloud.langfuse.com",
-    `sample ${profile.langfuseSampleRate ?? 1}`,
   ].join(" · ");
   // Missing keys are a warning, not an error: they may already be on the relay
   // from `autogent-nostr langfuse set`, and the agent degrades to no tracing.
@@ -496,20 +496,19 @@ const LANGFUSE_PRIVACY_OPTIONS: readonly { value: string; label: string; hint: s
     label: "metadata-only",
     hint: "usage, cost, timings, tool names only",
   },
+  { value: "prompts-only", label: "prompts-only", hint: "+ prompt and provider inputs" },
   { value: "conversations", label: "conversations", hint: "+ prompts and reply text (default)" },
-  { value: "full", label: "full", hint: "+ thinking, tool I/O, system prompt" },
+  { value: "full-debug", label: "full-debug", hint: "+ thinking, tool I/O, system prompt" },
 ];
 
-type LangfuseSettings = Pick<
-  AgentSettings,
-  "langfuseEnabled" | "langfuseHost" | "langfusePrivacy" | "langfuseSampleRate"
->;
+type LangfuseSettings = Pick<AgentSettings, "langfuseEnabled" | "langfuseHost" | "langfusePrivacy">;
 
 /**
- * The Langfuse steps (tracing plan §5.3, §6). The settings travel in the core
- * config record; the API keys do not — they are stored next to the profile's
- * `auth.json` and published as their own record at deploy, which is why this
- * step writes them as a side effect instead of returning them.
+ * The Langfuse steps (traced by the pi-langfuse extension). The settings
+ * travel in the core config record; the API keys do not — they are stored next
+ * to the profile's `auth.json` and published as their own record at deploy,
+ * which is why this step writes them as a side effect instead of returning
+ * them.
  */
 async function promptLangfuse(
   name: string,
@@ -520,14 +519,13 @@ async function promptLangfuse(
     initialValue: initial.langfuseEnabled,
   });
   if (cancelled(enabled)) return null;
-  // Turning tracing off keeps host/privacy/sample as they were: re-enabling it
-  // later should not start from scratch.
+  // Turning tracing off keeps host/privacy as they were: re-enabling it later
+  // should not start from scratch.
   if (!enabled) {
     return {
       langfuseEnabled: false,
       langfuseHost: initial.langfuseHost,
       langfusePrivacy: initial.langfusePrivacy,
-      langfuseSampleRate: initial.langfuseSampleRate,
     };
   }
 
@@ -553,28 +551,12 @@ async function promptLangfuse(
   });
   if (cancelled(privacy)) return null;
 
-  const sample = await p.text({
-    message: "Turn sampling rate 0..1 (empty = 1, trace everything)",
-    placeholder: "1",
-    initialValue: initial.langfuseSampleRate === null ? "" : String(initial.langfuseSampleRate),
-    validate: (value) => {
-      const trimmed = (value ?? "").trim();
-      if (trimmed === "") return undefined;
-      const parsed = Number(trimmed);
-      return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1
-        ? undefined
-        : "a number between 0 and 1, or empty";
-    },
-  });
-  if (cancelled(sample)) return null;
-
   if (!(await promptLangfuseKeys(name))) return null;
 
   return {
     langfuseEnabled: true,
     langfuseHost: host.trim() === "" ? null : host.trim(),
     langfusePrivacy: privacy === "" ? null : (privacy as LangfusePrivacyPreset),
-    langfuseSampleRate: sample.trim() === "" ? null : Number(sample.trim()),
   };
 }
 

@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { applyEnv, defaultConfig, validateConfig } from "../src/config.js";
+import {
+  applyEnv,
+  defaultConfig,
+  normalizeLangfusePrivacy,
+  validateConfig,
+} from "../src/config.js";
 
 const LANGFUSE_ENV_KEYS = [
   "AUTOGENT_LANGFUSE",
   "AUTOGENT_LANGFUSE_HOST",
   "AUTOGENT_LANGFUSE_PRIVACY",
-  "AUTOGENT_LANGFUSE_SAMPLE",
-  "AUTOGENT_LANGFUSE_ENV",
 ] as const;
 
 describe("langfuse config", () => {
@@ -25,30 +28,23 @@ describe("langfuse config", () => {
     }
   });
 
-  it("defaults to off, cloud host, conversations, full sampling", () => {
+  it("defaults to off, cloud host, conversations", () => {
     expect(defaultConfig().telemetry.langfuse).toEqual({
       enabled: false,
       host: "https://cloud.langfuse.com",
       privacy: "conversations",
-      sampleRate: 1,
     });
-    // No environment by default: the publisher derives it from remote.recordConfig.
-    expect(defaultConfig().telemetry.langfuse.environment).toBeUndefined();
   });
 
   it("applies the full env overlay", () => {
     process.env["AUTOGENT_LANGFUSE"] = "true";
     process.env["AUTOGENT_LANGFUSE_HOST"] = "https://langfuse.example.com";
     process.env["AUTOGENT_LANGFUSE_PRIVACY"] = "metadata-only";
-    process.env["AUTOGENT_LANGFUSE_SAMPLE"] = "0.25";
-    process.env["AUTOGENT_LANGFUSE_ENV"] = "staging";
 
     expect(applyEnv(defaultConfig()).telemetry.langfuse).toEqual({
       enabled: true,
       host: "https://langfuse.example.com",
       privacy: "metadata-only",
-      sampleRate: 0.25,
-      environment: "staging",
     });
   });
 
@@ -57,9 +53,7 @@ describe("langfuse config", () => {
     base.telemetry.langfuse = {
       enabled: true,
       host: "https://from-record.example.com",
-      privacy: "full",
-      sampleRate: 0.5,
-      environment: "prod",
+      privacy: "full-debug",
     };
     expect(applyEnv(base).telemetry.langfuse).toEqual(base.telemetry.langfuse);
   });
@@ -69,18 +63,13 @@ describe("langfuse config", () => {
     expect(applyEnv(defaultConfig()).telemetry.langfuse.privacy).toBe("conversations");
 
     const base = defaultConfig();
-    base.telemetry.langfuse.privacy = "full";
-    expect(applyEnv(base).telemetry.langfuse.privacy).toBe("full");
+    base.telemetry.langfuse.privacy = "full-debug";
+    expect(applyEnv(base).telemetry.langfuse.privacy).toBe("full-debug");
   });
 
-  it("ignores a non-numeric sample rate", () => {
-    process.env["AUTOGENT_LANGFUSE_SAMPLE"] = "most-of-them";
-    expect(applyEnv(defaultConfig()).telemetry.langfuse.sampleRate).toBe(1);
-  });
-
-  it("accepts a sample rate of 0 from the env", () => {
-    process.env["AUTOGENT_LANGFUSE_SAMPLE"] = "0";
-    expect(applyEnv(defaultConfig()).telemetry.langfuse.sampleRate).toBe(0);
+  it("maps the legacy 'full' preset to full-debug", () => {
+    process.env["AUTOGENT_LANGFUSE_PRIVACY"] = "full";
+    expect(applyEnv(defaultConfig()).telemetry.langfuse.privacy).toBe("full-debug");
   });
 
   it("treats a non-truthy AUTOGENT_LANGFUSE as off", () => {
@@ -91,28 +80,29 @@ describe("langfuse config", () => {
   });
 });
 
+describe("normalizeLangfusePrivacy", () => {
+  it("accepts the pi-langfuse presets", () => {
+    for (const preset of ["metadata-only", "prompts-only", "conversations", "full-debug"]) {
+      expect(normalizeLangfusePrivacy(preset)).toBe(preset);
+    }
+  });
+
+  it("maps legacy 'full' and rejects everything else", () => {
+    expect(normalizeLangfusePrivacy("full")).toBe("full-debug");
+    expect(normalizeLangfusePrivacy("everything")).toBeNull();
+    expect(normalizeLangfusePrivacy(42)).toBeNull();
+    expect(normalizeLangfusePrivacy(undefined)).toBeNull();
+  });
+});
+
 describe("validateConfig for langfuse", () => {
-  it("accepts the defaults and an enabled, well-formed exporter", () => {
+  it("accepts the defaults and an enabled, well-formed integration", () => {
     expect(validateConfig(defaultConfig())).toEqual([]);
 
     const enabled = defaultConfig();
     enabled.telemetry.langfuse.enabled = true;
     enabled.telemetry.langfuse.host = "http://localhost:3030";
-    enabled.telemetry.langfuse.sampleRate = 0;
     expect(validateConfig(enabled)).toEqual([]);
-  });
-
-  it("rejects an out-of-range sample rate when enabled", () => {
-    const config = defaultConfig();
-    config.telemetry.langfuse.enabled = true;
-    config.telemetry.langfuse.sampleRate = 1.5;
-    expect(validateConfig(config).join()).toMatch(/langfuse\.sampleRate/);
-
-    config.telemetry.langfuse.sampleRate = -1;
-    expect(validateConfig(config).join()).toMatch(/langfuse\.sampleRate/);
-
-    config.telemetry.langfuse.sampleRate = Number.NaN;
-    expect(validateConfig(config).join()).toMatch(/langfuse\.sampleRate/);
   });
 
   it("rejects a host without a scheme when enabled", () => {
@@ -122,10 +112,9 @@ describe("validateConfig for langfuse", () => {
     expect(validateConfig(config).join()).toMatch(/langfuse\.host/);
   });
 
-  it("ignores garbage behind a disabled exporter", () => {
+  it("ignores garbage behind a disabled integration", () => {
     const config = defaultConfig();
     config.telemetry.langfuse.enabled = false;
-    config.telemetry.langfuse.sampleRate = 42;
     config.telemetry.langfuse.host = "not-a-url";
     expect(validateConfig(config)).toEqual([]);
   });

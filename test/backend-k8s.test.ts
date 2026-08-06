@@ -221,16 +221,14 @@ describe("core-record derivation from the profile", () => {
       settings({
         langfuseEnabled: true,
         langfuseHost: "https://langfuse.internal",
-        langfusePrivacy: "full",
-        langfuseSampleRate: 0.5,
+        langfusePrivacy: "full-debug",
       }),
       0,
     );
     expect(full.langfuse).toEqual({
       enabled: true,
       host: "https://langfuse.internal",
-      privacy: "full",
-      sample_rate: 0.5,
+      privacy: "full-debug",
     });
 
     // Unset fields are omitted, not defaulted here: the runtime owns defaults.
@@ -239,7 +237,7 @@ describe("core-record derivation from the profile", () => {
 
     // Disabled emits nothing at all — absence already means "off".
     const off = buildCoreConfig(
-      settings({ langfuseHost: "https://langfuse.internal", langfusePrivacy: "full" }),
+      settings({ langfuseHost: "https://langfuse.internal", langfusePrivacy: "full-debug" }),
       0,
     );
     expect(off.langfuse).toBeUndefined();

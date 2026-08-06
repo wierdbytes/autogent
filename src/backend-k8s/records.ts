@@ -108,9 +108,6 @@ export function buildCoreConfig(
       enabled: true,
       ...(settings.langfuseHost !== null ? { host: settings.langfuseHost } : {}),
       ...(settings.langfusePrivacy !== null ? { privacy: settings.langfusePrivacy } : {}),
-      ...(settings.langfuseSampleRate !== null
-        ? { sample_rate: settings.langfuseSampleRate }
-        : {}),
     };
   }
 

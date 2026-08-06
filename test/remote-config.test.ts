@@ -76,8 +76,6 @@ describe("parseCoreConfig", () => {
         enabled: true,
         host: "https://langfuse.example.com",
         privacy: "metadata-only",
-        sample_rate: 0.25,
-        environment: "staging",
       },
     });
     expect(problems).toEqual([]);
@@ -85,18 +83,18 @@ describe("parseCoreConfig", () => {
       enabled: true,
       host: "https://langfuse.example.com",
       privacy: "metadata-only",
-      sample_rate: 0.25,
-      environment: "staging",
     });
   });
 
-  it("accepts the boundary sample rates", () => {
-    expect(parseCoreConfig({ v: 1, langfuse: { sample_rate: 0 } }).config?.langfuse).toEqual({
-      sample_rate: 0,
+  it("tolerates legacy exporter knobs and normalises the legacy 'full' preset", () => {
+    // Documents written before tracing moved to pi-langfuse may still carry
+    // sample_rate/environment; they are ignored like any unknown key.
+    const { config, problems } = parseCoreConfig({
+      v: 1,
+      langfuse: { enabled: true, privacy: "full", sample_rate: 0.25, environment: "staging" },
     });
-    expect(parseCoreConfig({ v: 1, langfuse: { sample_rate: 1 } }).config?.langfuse).toEqual({
-      sample_rate: 1,
-    });
+    expect(problems).toEqual([]);
+    expect(config?.langfuse).toEqual({ enabled: true, privacy: "full-debug" });
   });
 
   it("rejects malformed langfuse fields", () => {
@@ -105,12 +103,7 @@ describe("parseCoreConfig", () => {
       [{ v: 1, langfuse: [] }, /langfuse must be an object/],
       [{ v: 1, langfuse: { enabled: "yes" } }, /langfuse\.enabled/],
       [{ v: 1, langfuse: { privacy: "everything" } }, /langfuse\.privacy/],
-      [{ v: 1, langfuse: { sample_rate: 1.5 } }, /langfuse\.sample_rate/],
-      [{ v: 1, langfuse: { sample_rate: -0.1 } }, /langfuse\.sample_rate/],
-      [{ v: 1, langfuse: { sample_rate: "0.5" } }, /langfuse\.sample_rate/],
-      [{ v: 1, langfuse: { sample_rate: Number.NaN } }, /langfuse\.sample_rate/],
       [{ v: 1, langfuse: { host: 42 } }, /host/],
-      [{ v: 1, langfuse: { environment: ["prod"] } }, /environment/],
     ];
     for (const [document, expected] of cases) {
       const { config, problems } = parseCoreConfig(document);
@@ -189,21 +182,18 @@ describe("applyCoreConfig", () => {
     const base = defaultConfig();
     base.telemetry.langfuse.enabled = false;
     base.telemetry.langfuse.host = "https://from-env.example.com";
-    base.telemetry.langfuse.privacy = "full";
-    base.telemetry.langfuse.sampleRate = 0.5;
+    base.telemetry.langfuse.privacy = "full-debug";
 
     const next = applyCoreConfig(base, {
       v: 1,
-      langfuse: { enabled: true, privacy: "metadata-only", environment: "prod" },
+      langfuse: { enabled: true, privacy: "metadata-only" },
     });
 
     // record > env for the fields it names...
     expect(next.telemetry.langfuse.enabled).toBe(true);
     expect(next.telemetry.langfuse.privacy).toBe("metadata-only");
-    expect(next.telemetry.langfuse.environment).toBe("prod");
     // ...and the base survives where it is silent.
     expect(next.telemetry.langfuse.host).toBe("https://from-env.example.com");
-    expect(next.telemetry.langfuse.sampleRate).toBe(0.5);
     // the base object is untouched
     expect(base.telemetry.langfuse.enabled).toBe(false);
   });
@@ -211,18 +201,11 @@ describe("applyCoreConfig", () => {
   it("keeps the whole langfuse base when the record omits the block", () => {
     const base = defaultConfig();
     base.telemetry.langfuse.enabled = true;
-    base.telemetry.langfuse.sampleRate = 0.1;
 
     expect(applyCoreConfig(base, { v: 1 }).telemetry.langfuse).toEqual(base.telemetry.langfuse);
     expect(applyCoreConfig(base, { v: 1, langfuse: {} }).telemetry.langfuse).toEqual(
       base.telemetry.langfuse,
     );
-  });
-
-  it("applies a langfuse sample rate of 0 (record disables sampling)", () => {
-    const base = defaultConfig();
-    expect(applyCoreConfig(base, { v: 1, langfuse: { sample_rate: 0 } }).telemetry.langfuse.sampleRate)
-      .toBe(0);
   });
 
   it("overrides the respond-to surface atomically", () => {

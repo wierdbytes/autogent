@@ -47,7 +47,6 @@ import { resolveToolPolicy, toPiToolConfig } from "../security/tool-policy.js";
 import { openDatabase } from "../state/database.js";
 import type { AgentState } from "../state/database.js";
 import { applyRecovery, planRecovery } from "../state/recovery.js";
-import { LangfusePublisher } from "../telemetry/langfuse-publisher.js";
 import { ObserverPublisher } from "../telemetry/observer-publisher.js";
 import { UsagePublisher } from "../telemetry/usage-publisher.js";
 import { UsageTracker } from "../telemetry/usage-tracker.js";
@@ -59,8 +58,12 @@ import { InactivityMonitor } from "./inactivity.js";
 import { systemClock } from "./clock.js";
 import { canonicalThreadRoot } from "./conversation-key.js";
 import { OutputRouter } from "./output-router.js";
-import type { Clock, Logger, RelayPort, SessionRegistryPort, TracingPort } from "./ports.js";
-import { NoopTracingPort } from "./ports.js";
+import type { Clock, Logger, RelayPort, SessionRegistryPort } from "./ports.js";
+import {
+  clearLangfuseEnv,
+  setLangfuseEnv,
+  withLangfuseExtension,
+} from "./langfuse-extension.js";
 import { Semaphore } from "./scheduler.js";
 import { SessionRegistry } from "./session-registry.js";
 import type { TurnContext } from "./turn-context.js";
@@ -97,12 +100,6 @@ const PRE_LIVE_PHASES: ReadonlySet<RuntimePhase> = new Set<RuntimePhase>([
 export const SHUTDOWN_FINALIZE_RESERVE_MS = 7_000;
 
 /**
- * Ceiling on draining the outgoing trace exporter when the port is swapped at
- * runtime (revoked keys, tracing switched off). A config push must stay fast.
- */
-const TRACING_SWAP_BUDGET_MS = 3_000;
-
-/**
  * Remote (record-configured) mode, prepared by `main.ts` (remote plan §3).
  *
  * The initial head fetch happens before the runtime is constructed — the
@@ -120,7 +117,7 @@ export interface RemoteRuntimeOptions {
   /**
    * Langfuse API keys from the `autogent/langfuse` head, or null when the head
    * is absent, tombstoned or malformed. Absence is not degraded: tracing is
-   * optional, so the agent simply runs without it (tracing plan §5.2).
+   * optional, so the agent simply runs without it.
    */
   langfuseCredentials: LangfuseCredentials | null;
   langfuseHeadCreatedAt: number;
@@ -142,11 +139,6 @@ export interface AppRuntimeOptions {
   /** Injected by tests; production creates real Pi sessions through the SDK. */
   sessions?: SessionRegistryPort;
   /**
-   * Turn trace sink. Supplied when Langfuse is enabled; tests and the default
-   * local mode run on the no-op port, so tracing never changes behaviour.
-   */
-  tracing?: TracingPort;
-  /**
    * Agent secret as 64-char hex, for the buzz CLI broker only (buzz-cli plan
    * §3). Absent in tests — the broker is simply not started then.
    */
@@ -164,25 +156,10 @@ export class AppRuntime {
   readonly #state: AgentState;
   readonly #relay: RelayPort;
   readonly #telemetry: ObserverPublisher;
-  /**
-   * Swappable at runtime: a Langfuse key revocation or an `enabled` flip in the
-   * core record replaces the port on live actors, which reach it through
-   * `#tracingDelegate` rather than holding this reference.
-   */
-  #tracing: TracingPort;
-  /** True when a test injected the port; hot-reload must not overwrite it. */
-  readonly #tracingInjected: boolean;
   /** One warn per "enabled but keyless" transition, never a flood. */
   #langfuseWarned = false;
-  /** Stable `TracingPort` handed to actors; every call re-reads `#tracing`. */
-  readonly #tracingDelegate: TracingPort = {
-    turnStarted: (route, info) => this.#tracing.turnStarted(route, info),
-    event: (turnId, event) => this.#tracing.event(turnId, event),
-    steering: (turnId, text, authorPubkey) => this.#tracing.steering(turnId, text, authorPubkey),
-    turnFinished: (turnId, outcome) => this.#tracing.turnFinished(turnId, outcome),
-    flush: () => this.#tracing.flush(),
-    shutdown: (budgetMs) => this.#tracing.shutdown(budgetMs),
-  };
+  /** True while the pi-langfuse env surface is ours to clear. */
+  #langfuseEnvApplied = false;
   readonly #usageTracker: UsageTracker;
   readonly #usagePublisher: UsagePublisher;
   readonly #outboxPublisher: OutboxPublisher;
@@ -201,8 +178,14 @@ export class AppRuntime {
   #coreHeadCreatedAt = 0;
   #authHeadCreatedAt = 0;
   #langfuseHeadCreatedAt = 0;
-  /** Record-sourced Langfuse keys; they outrank env (tracing plan §5.2). */
+  /** Record-sourced Langfuse keys; they outrank env. */
   #langfuseCredentials: LangfuseCredentials | null = null;
+  /**
+   * `LANGFUSE_*` keys as the process was started with, captured before
+   * {@link setLangfuseEnv} ever mutates the environment — the local-mode
+   * fallback when no record head carries keys.
+   */
+  readonly #envLangfuseCredentials: LangfuseCredentials | null;
   #stopAuthWatcher: (() => void) | null = null;
   readonly #inactivity: InactivityMonitor;
   readonly #gitProxy: GitAuthProxy;
@@ -259,8 +242,8 @@ export class AppRuntime {
       coalesceWindowMs: this.#config.telemetry.coalesceMs,
     });
 
-    this.#tracingInjected = options.tracing !== undefined;
-    this.#tracing = options.tracing ?? this.#createTracing();
+    this.#envLangfuseCredentials = langfuseCredentialsFromEnv();
+    this.#syncLangfuse();
 
     this.#usageTracker = new UsageTracker({
       sessions: this.#state.sessions,
@@ -329,7 +312,14 @@ export class AppRuntime {
     this.#sessions =
       options.sessions ??
       new SessionRegistry({
-        config: { ...this.#config.pi, ...toPiToolConfig(toolPolicy) },
+        config: {
+          ...this.#config.pi,
+          ...toPiToolConfig(toolPolicy),
+          extensions: withLangfuseExtension(
+            this.#config.pi.extensions,
+            this.#config.telemetry.langfuse.enabled,
+          ),
+        },
         channels: this.#state.channels,
         relayId: this.#config.relayId,
         logger: this.#logger.child({ component: "sessions" }),
@@ -362,10 +352,6 @@ export class AppRuntime {
       relayId: this.#config.relayId,
       state: this.#state,
       telemetry: this.#telemetry,
-      // A delegate, not the port itself: actors capture their deps once at
-      // creation, and a revoked key must switch tracing off on the actors that
-      // already exist, not only on the next one.
-      tracing: this.#tracingDelegate,
       output,
       sessions: this.#sessions,
       clock: this.#clock,
@@ -429,88 +415,51 @@ export class AppRuntime {
   }
 
   /**
-   * Builds the trace sink from config (tracing plan §5.2).
+   * Reconciles the pi-langfuse env surface with config and credentials.
    *
-   * Fail-closed-degraded: tracing switched on without credentials is one warn
-   * and a no-op port, never a refusal to boot — an observability gap must not
-   * take the agent down.
-   */
-  #createTracing(): TracingPort {
-    const langfuse = this.#config.telemetry.langfuse;
-    if (!langfuse.enabled) return new NoopTracingPort();
-    const credentials = this.#langfuseCredentials ?? langfuseCredentialsFromEnv();
-    if (credentials === null) {
-      this.#langfuseWarned = true;
-      this.#logger.warn("langfuse tracing enabled but credentials missing; tracing disabled");
-      return new NoopTracingPort();
-    }
-    return this.#newLangfusePublisher(langfuse, credentials);
-  }
-
-  #newLangfusePublisher(
-    config: AgentConfig["telemetry"]["langfuse"],
-    credentials: LangfuseCredentials,
-  ): LangfusePublisher {
-    return new LangfusePublisher({
-      config,
-      credentials,
-      relayId: this.#config.relayId,
-      // The deployment mode is the useful default: record-configured agents run
-      // in the cluster, everything else is someone's laptop.
-      defaultEnvironment: this.#config.remote.recordConfig ? "remote" : "local",
-      clock: this.#clock,
-      logger: this.#logger.child({ component: "langfuse" }),
-    });
-  }
-
-  /**
-   * Reconciles the live trace sink with config and credentials.
+   * Tracing itself is the pi-langfuse extension's job: the runtime only loads
+   * the extension (session extension list) and feeds it `LANGFUSE_*` variables,
+   * which the extension re-reads on every session start. One place decides, so
+   * a core-record push and a Langfuse-key push cannot disagree.
    *
-   * One place decides, so a core-record push and a Langfuse-key push cannot
-   * disagree about what the port should be. The swap happens before the old
-   * pipeline is drained: an actor starting a turn during the shutdown must
-   * already see the new port.
+   * Fail-open: tracing switched on without credentials is one warn and no env,
+   * never a refusal to boot — an observability gap must not take the agent
+   * down.
    */
-  async #syncTracing(): Promise<void> {
-    if (this.#tracingInjected) return;
+  #syncLangfuse(): void {
     const langfuse = this.#config.telemetry.langfuse;
-    const credentials = this.#langfuseCredentials ?? langfuseCredentialsFromEnv();
-    const current = this.#tracing;
+    const credentials = this.#langfuseCredentials ?? this.#envLangfuseCredentials;
 
     if (!langfuse.enabled || credentials === null) {
       if (langfuse.enabled && !this.#langfuseWarned) {
         this.#langfuseWarned = true;
         this.#logger.warn("langfuse tracing enabled but credentials missing; tracing disabled");
       }
-      if (!(current instanceof LangfusePublisher)) return;
-      this.#tracing = new NoopTracingPort();
-      // Bounded: a dead exporter must not hold a config push hostage.
-      await current.shutdown(TRACING_SWAP_BUDGET_MS);
-      this.#logger.info("langfuse tracing disabled", {
-        reason: langfuse.enabled ? "credentials_revoked" : "config_disabled",
-      });
+      if (this.#langfuseEnvApplied) {
+        clearLangfuseEnv();
+        this.#langfuseEnvApplied = false;
+        this.#logger.info("langfuse tracing disabled", {
+          reason: langfuse.enabled ? "credentials_revoked" : "config_disabled",
+        });
+      }
       return;
     }
 
     this.#langfuseWarned = false;
-    if (current instanceof LangfusePublisher) {
-      current.reconfigure({ config: langfuse, credentials });
-      return;
+    setLangfuseEnv(langfuse, credentials);
+    if (!this.#langfuseEnvApplied) {
+      this.#langfuseEnvApplied = true;
+      this.#logger.info("langfuse tracing enabled", { extension: "pi-langfuse" });
     }
-    this.#tracing = this.#newLangfusePublisher(langfuse, credentials);
-    this.#logger.info("langfuse tracing enabled");
+  }
+
+  /** Whether new sessions load pi-langfuse with credentials in place. */
+  get langfuseActive(): boolean {
+    return this.#langfuseEnvApplied;
   }
 
   get phase(): RuntimePhase {
     return this.#phase;
-  }
-
-  /**
-   * Which trace sink is live. Diagnostic surface (and the seam tests assert on):
-   * the port itself stays private so nothing can reach into it.
-   */
-  get tracingKind(): "langfuse" | "noop" {
-    return this.#tracing instanceof LangfusePublisher ? "langfuse" : "noop";
   }
 
   /** True while a required record head is missing or revoked (plan §6.2.8). */
@@ -612,14 +561,6 @@ export class AppRuntime {
     }
     await this.#withDeadline(this.#telemetry.flush(), drainDeadline, "telemetry-flush");
     this.#telemetry.close();
-    // The exporter gets its own ceiling on top of the drain deadline: a slow
-    // tracing backend must not eat the k8s grace budget (plan §7).
-    const tracingBudgetMs = Math.max(0, Math.min(5_000, drainDeadline - this.#clock.now()));
-    await this.#withDeadline(
-      this.#tracing.shutdown(tracingBudgetMs),
-      drainDeadline,
-      "tracing-shutdown",
-    );
     await this.#withDeadline(this.#outboxPublisher.stop(), drainDeadline, "outbox-stop");
 
     this.#buzzBroker?.close();
@@ -886,13 +827,13 @@ export class AppRuntime {
       appendSystemPrompt: next.pi.appendSystemPrompt,
       tools: next.pi.tools,
       excludeTools: next.pi.excludeTools,
-      extensions: next.pi.extensions,
+      extensions: withLangfuseExtension(next.pi.extensions, next.telemetry.langfuse.enabled),
     });
     this.#config = { ...next, stateDir: this.#config.stateDir, relayUrl: this.#config.relayUrl };
     this.#inactivity.arm(next.lifecycle.inactivityExitSec);
     // Reads the config that was just installed, so an `enabled` flip or a new
-    // host/privacy/sample binds without a restart (tracing plan §5.3).
-    await this.#syncTracing();
+    // host/privacy binds to the next session without a restart.
+    this.#syncLangfuse();
 
     this.#logger.info("core record applied", { createdAt: head.createdAt });
     if (this.#missing.core) {
@@ -935,11 +876,12 @@ export class AppRuntime {
   }
 
   /**
-   * Applies a newer `autogent/langfuse` head (tracing plan §5.2).
+   * Applies a newer `autogent/langfuse` head.
    *
    * A tombstone (or any unusable value) means the owner revoked the keys:
-   * tracing goes off on the live actors immediately, and the agent keeps
-   * answering — observability is never load-bearing.
+   * the env surface is cleared and idle sessions are rotated so the change
+   * binds to the next turn, and the agent keeps answering — observability is
+   * never load-bearing.
    */
   async #onLangfuseRecord(head: RecordHead): Promise<void> {
     if (head.createdAt <= this.#langfuseHeadCreatedAt) return;
@@ -957,7 +899,10 @@ export class AppRuntime {
     // Stored even while tracing is switched off in config: a later `enabled`
     // push must not need a second key publication.
     this.#langfuseCredentials = credentials;
-    await this.#syncTracing();
+    this.#syncLangfuse();
+    // pi-langfuse reads its env at session start; rotating idle sessions is
+    // what makes a key push or revocation bind without a restart.
+    await this.#sessions.applyConfig?.({});
   }
 
   /** Publishes a pi OAuth refresh back to the relay (plan §3.2 write-back). */

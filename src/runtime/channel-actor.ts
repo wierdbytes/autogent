@@ -22,7 +22,6 @@ import type {
   SessionSeedMessage,
   StatePort,
   TelemetryPort,
-  TracingPort,
 } from "./ports.js";
 import type { OutputRouter } from "./output-router.js";
 import {
@@ -58,8 +57,6 @@ export interface ChannelActorDeps {
   channelType: ChannelType;
   state: StatePort;
   telemetry: TelemetryPort;
-  /** Turn-level trace sink; a no-op unless a tracing backend is configured. */
-  tracing: TracingPort;
   output: OutputRouter;
   clock: Clock;
   logger: Logger;
@@ -373,24 +370,6 @@ export class ChannelActor {
       startedAt: new Date(startedAtMs).toISOString(),
       payload: { triggeringEventIds: [event.id], source: "nostr" },
     });
-    // The trace sees the turn's real input, not the ACP-shaped frame above.
-    this.deps.tracing.turnStarted(
-      {
-        channelId: this.deps.channelId,
-        sessionId: session.sessionId,
-        turnId,
-        startedAt: new Date(startedAtMs).toISOString(),
-      },
-      {
-        channelType: this.deps.channelType,
-        channelName: this.deps.channelName,
-        authorPubkey: event.pubkey,
-        triggeringEventIds: [event.id],
-        prompt,
-        systemPrompt: session.systemPrompt,
-        model: session.model,
-      },
-    );
     this.deps.telemetry.emit({
       kind: "acp_write",
       channelId: this.deps.channelId,
@@ -469,7 +448,6 @@ export class ChannelActor {
 
     this.deps.state.inbox.setDisposition(event.id, "steer_delivered");
     this.deps.state.turns.markInputDelivered(turn.context.turnId, event.id, this.deps.clock.now());
-    this.deps.tracing.steering(turn.context.turnId, prompt, event.pubkey);
 
     this.deps.telemetry.emit({
       kind: "acp_write",
@@ -496,9 +474,6 @@ export class ChannelActor {
     // serialised into Desktop-compatible frames here — and only here — so they
     // can never reach the channel, only the encrypted observer stream.
     if (turn) {
-      // Raw, before the lossy ACP translation below: the trace wants the
-      // normalised event as the router produced it.
-      this.deps.tracing.event(turn.context.turnId, event);
       const route = {
         channelId: this.deps.channelId,
         sessionId: this.#session?.sessionId ?? null,
@@ -582,13 +557,6 @@ export class ChannelActor {
       turnId: turn.context.turnId,
       payload: stopReason === "end_turn" ? {} : { outcome: stopReason, error: stopReason },
     });
-
-    this.deps.tracing.turnFinished(turn.context.turnId, {
-      stopReason,
-      finalText: turn.lastAssistantText,
-    });
-    // Fire-and-forget: the export must not hold up the next queued turn.
-    void this.deps.tracing.flush();
 
     this.#turn = null;
     this.#state = "idle";

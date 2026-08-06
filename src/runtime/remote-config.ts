@@ -8,6 +8,7 @@
  * env-derived config as a base layer for local development only.
  */
 
+import { normalizeLangfusePrivacy } from "../config.js";
 import type { AgentConfig, LangfusePrivacyPreset, RespondToMode } from "../config.js";
 
 export interface CoreConfigV1 {
@@ -26,20 +27,17 @@ export interface CoreConfigV1 {
   /** 0 is a legal "run indefinitely". */
   inactivity_exit_sec?: number;
   /**
-   * Langfuse trace export (tracing plan §5.3). Credentials never travel here:
-   * they live in the separate `autogent/langfuse` record.
+   * Langfuse tracing via the pi-langfuse extension. Credentials never travel
+   * here: they live in the separate `autogent/langfuse` record.
    */
   langfuse?: {
     enabled?: boolean;
     host?: string;
     privacy?: LangfusePrivacyPreset;
-    sample_rate?: number;
-    environment?: string;
   };
 }
 
 const RESPOND_TO: ReadonlySet<string> = new Set(["owner-only", "allowlist", "anyone", "nobody"]);
-const LANGFUSE_PRIVACY: ReadonlySet<string> = new Set(["metadata-only", "conversations", "full"]);
 const HEX64 = /^[0-9a-f]{64}$/;
 
 function asObject(value: unknown): Record<string, unknown> | null {
@@ -188,29 +186,27 @@ export function parseCoreConfig(document: unknown): ParsedCoreConfig {
         problems.push("langfuse.enabled must be a boolean");
       }
       const host = optionalString(langfuse, "host", problems);
-      const environment = optionalString(langfuse, "environment", problems);
 
+      // Legacy documents may still carry `sample_rate`/`environment` (the
+      // in-house exporter's knobs) and the old `full` preset; they are
+      // tolerated as unknown keys / normalised rather than rejected, so an
+      // older owner-side writer does not brick the agent.
       const privacy = optionalString(langfuse, "privacy", problems);
       let validPrivacy: LangfusePrivacyPreset | undefined;
       if (privacy !== undefined) {
-        if (LANGFUSE_PRIVACY.has(privacy)) validPrivacy = privacy as LangfusePrivacyPreset;
-        else problems.push(`langfuse.privacy must be one of ${[...LANGFUSE_PRIVACY].join(", ")}`);
-      }
-
-      const sampleRaw = langfuse["sample_rate"];
-      let sampleRate: number | undefined;
-      if (sampleRaw !== undefined && sampleRaw !== null) {
-        if (typeof sampleRaw !== "number" || !Number.isFinite(sampleRaw) || sampleRaw < 0 || sampleRaw > 1) {
-          problems.push("langfuse.sample_rate must be a number between 0 and 1");
-        } else sampleRate = sampleRaw;
+        const normalized = normalizeLangfusePrivacy(privacy);
+        if (normalized) validPrivacy = normalized;
+        else {
+          problems.push(
+            "langfuse.privacy must be one of metadata-only, prompts-only, conversations, full-debug",
+          );
+        }
       }
 
       config.langfuse = {
         ...(typeof enabled === "boolean" ? { enabled } : {}),
         ...(host !== undefined ? { host } : {}),
         ...(validPrivacy !== undefined ? { privacy: validPrivacy } : {}),
-        ...(sampleRate !== undefined ? { sample_rate: sampleRate } : {}),
-        ...(environment !== undefined ? { environment } : {}),
       };
     }
   }
@@ -256,8 +252,6 @@ export function applyCoreConfig(base: AgentConfig, core: CoreConfigV1): AgentCon
     if (langfuse.enabled !== undefined) next.telemetry.langfuse.enabled = langfuse.enabled;
     if (langfuse.host !== undefined) next.telemetry.langfuse.host = langfuse.host;
     if (langfuse.privacy !== undefined) next.telemetry.langfuse.privacy = langfuse.privacy;
-    if (langfuse.sample_rate !== undefined) next.telemetry.langfuse.sampleRate = langfuse.sample_rate;
-    if (langfuse.environment !== undefined) next.telemetry.langfuse.environment = langfuse.environment;
   }
   return next;
 }

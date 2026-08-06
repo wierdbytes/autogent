@@ -129,10 +129,13 @@ kubectl -n autogent exec autogent-<pubkey12> -- \
 
 ### Langfuse tracing
 
-Опционально агент шлёт трейсы в Langfuse (cloud или self-hosted): один trace
-на turn, generation-observations с usage/cost на каждый вызов модели, span на
-каждый tool call, Nostr-метаданные (канал, автор, relay) для фильтрации
-(план: `docs/plans/20260806-langfuse-tracing.md`).
+Опционально агент шлёт трейсы в Langfuse (cloud или self-hosted) через
+pi-экстеншен [`pi-langfuse`](https://github.com/gooyoung/pi-langfuse): один
+trace на промпт, generation-observations с usage/cost на каждый вызов
+модели, observation на каждый tool call, редакция секретов перед
+отправкой. Когда трейсинг включён и ключи есть, рантайм добавляет
+`npm:pi-langfuse` в список экстеншенов каждой pi-сессии и передаёт
+параметры через стандартные `LANGFUSE_*` переменные окружения.
 
 **Включение.** Блок `langfuse` в конфиге агента (`autogent/config`, публикуется
 через `config publish`):
@@ -143,17 +146,15 @@ kubectl -n autogent exec autogent-<pubkey12> -- \
   "langfuse": {
     "enabled": true,
     "host": "https://cloud.langfuse.com",
-    "privacy": "conversations",
-    "sample_rate": 1
+    "privacy": "conversations"
   }
 }
 ```
 
 Для локального (нерелейного) режима те же поля задаются через
-`AUTOGENT_LANGFUSE` / `AUTOGENT_LANGFUSE_HOST` / `AUTOGENT_LANGFUSE_PRIVACY` /
-`AUTOGENT_LANGFUSE_SAMPLE` / `AUTOGENT_LANGFUSE_ENV`, а сами ключи — через
-стандартные для экосистемы Langfuse `LANGFUSE_PUBLIC_KEY` /
-`LANGFUSE_SECRET_KEY`.
+`AUTOGENT_LANGFUSE` / `AUTOGENT_LANGFUSE_HOST` / `AUTOGENT_LANGFUSE_PRIVACY`,
+а сами ключи — через стандартные для экосистемы Langfuse
+`LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`.
 
 **Ключи (remote).** `enabled: true` в конфиге ещё не даёт агенту ключей —
 они едут отдельным каналом, ровно как `auth login/revoke`:
@@ -167,29 +168,32 @@ autogent-nostr langfuse revoke --agent <pubkey>    # tombstone
 
 `set` публикует record `autogent/langfuse` (kind 30078, NIP-44-шифрован под
 self-key агента — как `autogent/auth`); работающий агент подхватывает его по
-живой подписке и переконфигурирует publisher без рестарта. `revoke`
-публикует tombstone (`value: null`): агент выключает tracing на лету и
+живой подписке, обновляет `LANGFUSE_*` env и ротирует простаивающие
+pi-сессии — ключи привязываются со следующего turn'а без рестарта.
+`revoke` публикует tombstone (`value: null`): агент выключает tracing и
 продолжает работать как обычно — это degrade только трейсинга, не самого
 агента. `status` печатает `created_at` головы и public key; secret key
 никогда не печатается (`sk-lf-***`).
 
 **Privacy-пресеты.** Выбираются владельцем при настройке профиля
-(`langfuse.privacy` в конфиге), enforced публикатором:
+(`langfuse.privacy` в конфиге), enforced экстеншеном (это его пресеты,
+`LANGFUSE_PRIVACY_PRESET`):
 
-| Поле | `metadata-only` | `conversations` (default) | `full` |
-| --- | :-: | :-: | :-: |
-| Nostr-метаданные, usage, cost, тайминги, имена tool'ов, error-флаги | ✅ | ✅ | ✅ |
-| prompt (input) и текст ответа (output) | — | ✅ | ✅ |
-| thinking, tool input/output | — | — | ✅ |
-| систем-промпт (полный эффективный) | — | — | ✅ |
+| Поле | `metadata-only` | `prompts-only` | `conversations` (default) | `full-debug` |
+| --- | :-: | :-: | :-: | :-: |
+| usage, cost, тайминги, имена tool'ов, error-флаги | ✅ | ✅ | ✅ | ✅ |
+| prompt (input) | — | ✅ | ✅ | ✅ |
+| текст ответа (output) | — | — | ✅ | ✅ |
+| thinking, tool input/output, систем-промпт, cwd | — | — | — | ✅ |
 
+Старое значение `full` принимается и нормализуется в `full-debug`.
 Default — `conversations`: агент читает чужие сообщения из каналов, а tool
 I/O может содержать содержимое файлов и вывод команд — это самый рискованный
-слой, поэтому `full` не default.
+слой, поэтому `full-debug` не default.
 
-**Fail-closed-degraded, но только для трейсинга.** `enabled: true` без
+**Fail-open, но только для трейсинга.** `enabled: true` без
 разрешённых credentials (ни record, ни env) — один warn в лог, agent работает
-дальше как обычно, просто без трейсов (no-op tracing port). Это отличается от
+дальше как обычно, просто без трейсов. Это отличается от
 деградации самого агента (нет `autogent/config` или невалидные provider-креды) —
 отсутствие Langfuse-ключей никогда не блокирует промпты.
 
