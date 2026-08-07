@@ -8,7 +8,7 @@
  *
  * - The extension source is appended to the session extension list when
  *   `telemetry.langfuse.enabled` is true. Pi's package manager resolves and
- *   installs the `npm:` specifier at session start.
+ *   installs the `git:` specifier at session start.
  * - Credentials and settings travel through the environment variables the
  *   extension reads at load time (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`,
  *   `LANGFUSE_BASE_URL`, `LANGFUSE_PRIVACY_PRESET`). The extension re-reads
@@ -24,8 +24,19 @@
 import type { LangfuseConfig } from "../config.js";
 import type { LangfuseCredentials } from "./provider-auth.js";
 
-/** The extension source handed to Pi's resource loader. */
-export const LANGFUSE_EXTENSION_SOURCE = "npm:pi-langfuse";
+/**
+ * The extension source handed to Pi's resource loader.
+ *
+ * Points at our fork rather than `npm:pi-langfuse`: upstream snapshots the
+ * system prompt inside `before_agent_start`, before our inline shaper
+ * extension (always appended last by the resource loader) trims it, so traces
+ * showed the Guidelines / Pi documentation sections the model never received.
+ * The fork captures the prompt at `agent_start`, after the final override.
+ * Switch back to `npm:pi-langfuse` once the fix lands upstream
+ * (https://github.com/gooyoung/pi-langfuse/pull/13).
+ */
+export const LANGFUSE_EXTENSION_SOURCE =
+  "git:github.com/wierdbytes/pi-langfuse@fix/system-prompt-capture-after-extensions";
 
 /**
  * Returns the effective extension list: the owner's extensions with the

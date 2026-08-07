@@ -96,7 +96,8 @@ export interface SchedulerConfig {
 /**
  * Langfuse tracing via the pi-langfuse extension.
  *
- * When enabled, the runtime loads the `npm:pi-langfuse` Pi extension into
+ * When enabled, the runtime loads the pi-langfuse Pi extension (currently
+ * our fork, see `LANGFUSE_EXTENSION_SOURCE`) into
  * every session and passes host/privacy through its environment surface.
  * Credentials are deliberately absent: `publicKey`/`secretKey` are resolved
  * separately (runtime/provider-auth.ts) so they never land in a config object
